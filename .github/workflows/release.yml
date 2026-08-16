@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $env:CGO_ENABLED = "0"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o dist/play.exe .
+          go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o dist/play-check.exe .
+          $releaseHash = (Get-FileHash -Algorithm SHA256 dist/play.exe).Hash
+          $checkHash = (Get-FileHash -Algorithm SHA256 dist/play-check.exe).Hash
+          if ($releaseHash -ne $checkHash) {
+            throw "repeated builds are not byte-identical"
+          }
+          Remove-Item dist/play-check.exe
+          $reportedVersion = (& .\dist\play.exe -version).Trim()
+          if ($reportedVersion -notmatch '^play (?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "built executable reports an invalid version"
+          }
+          $version = $Matches.version
+          $sha256 = $releaseHash.ToLower()
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHA256=$sha256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sha256  play.exe" | Set-Content -NoNewline dist/play.exe.sha256
+
+      - name: Prepare Scoop manifest
+        shell: pwsh
+        run: |
+          $repositoryURL = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $manifest = Get-Content bucket/play.json.template -Raw
+          $manifest = $manifest.Replace("@VERSION@", $env:VERSION)
+          $manifest = $manifest.Replace("@SHA256@", $env:SHA256)
+          $manifest = $manifest.Replace("@REPOSITORY_URL@", $repositoryURL)
+          if ($manifest.Contains("@VERSION@") -or $manifest.Contains("@SHA256@") -or $manifest.Contains("@REPOSITORY_URL@")) {
+            throw "generated Scoop manifest contains unresolved template values"
+          }
+          $parsed = $manifest | ConvertFrom-Json
+          $releaseURL = "$repositoryURL/releases/download/v$env:VERSION/play.exe"
+          if ($parsed.version -ne $env:VERSION -or $parsed.homepage -ne $repositoryURL -or $parsed.architecture.'64bit'.url -ne $releaseURL -or $parsed.architecture.'64bit'.hash -ne $env:SHA256) {
+            throw "generated Scoop manifest does not match the release"
+          }
+          [IO.File]::WriteAllText("dist/play.json", $manifest, [Text.UTF8Encoding]::new($false))
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$env:VERSION" "dist/play.exe#play.exe" "dist/play.exe.sha256#play.exe.sha256" --target "$env:GITHUB_SHA" --title "play v$env:VERSION" --generate-notes
+
+      - name: Update Scoop bucket
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          $content = [Convert]::ToBase64String([IO.File]::ReadAllBytes("dist/play.json"))
+          $path = "bucket/play.json"
+          $sha = gh api --method GET "repos/$env:GITHUB_REPOSITORY/contents/$path" -f "ref=$env:DEFAULT_BRANCH" --jq .sha 2>$null
+          $apiArgs = @(
+            "api",
+            "--method", "PUT",
+            "repos/$env:GITHUB_REPOSITORY/contents/$path",
+            "-f", "message=bucket: update play to $env:VERSION",
+            "-f", "content=$content",
+            "-f", "branch=$env:DEFAULT_BRANCH"
+          )
+          if ($LASTEXITCODE -eq 0 -and $sha) {
+            $apiArgs += @("-f", "sha=$sha")
+          }
+          & gh @apiArgs | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to update Scoop bucket manifest"
+          }
