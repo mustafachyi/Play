@@ -2,7 +2,7 @@
 
 Play YouTube videos and playlists with [mpv](https://mpv.io/) on Windows.
 
-Play accepts YouTube URLs, playlist URLs, and video IDs. It supports normal video playback, audio-only playback, multiple available media tracks, subtitles, timestamps, and playlists.
+Play accepts YouTube URLs, playlist URLs, and video IDs. It supports video playback, audio only playback, multiple media tracks, subtitles, timestamps, and playlists.
 
 ## Installation
 
@@ -54,26 +54,100 @@ Play a playlist:
 play "https://www.youtube.com/playlist?list=PLAYLIST_ID"
 ```
 
-Run without an argument to enter a YouTube URL or video ID interactively:
+Run Play without an argument to enter a YouTube URL, playlist URL, or video ID interactively:
 
 ```cmd
 play
 ```
 
-Available options:
+`-a` plays audio only.
 
-- `-a` — play audio only
-- `-h`, `-help` — show help
-- `-version` — show the installed version
+`-h` and `-help` show help.
+
+`-version` shows the installed version.
 
 YouTube Mix playlists and live streams are not supported.
 
+## ModernZ
+
+For a more complete player experience, releases include an optional `ModernZ.zip`.
+
+The included package is based on [ModernZ](https://github.com/Samillion/ModernZ) and has been modified to add a video track control. This allows the video quality provided by Play to be changed directly from the player while a video is running.
+
+ModernZ is optional. Play works normally without it.
+
+### Install with Scoop
+
+If mpv was installed through Scoop, extract the contents of `ModernZ.zip` into the mpv `portable_config` directory.
+
+For a standard per user Scoop installation, the directory is:
+
+```text
+%USERPROFILE%\scoop\apps\mpv\current\portable_config
+```
+
+If Scoop is installed somewhere else, find the mpv installation directory with:
+
+```cmd
+scoop prefix mpv
+```
+
+Open the returned directory and extract `ModernZ.zip` into its `portable_config` folder.
+
+### Install with mpv
+
+For a regular Windows mpv installation, extract the contents of `ModernZ.zip` into:
+
+```text
+%APPDATA%\mpv
+```
+
+If the directory does not exist, create it.
+
+If your mpv installation already has a `portable_config` directory beside `mpv.exe`, use that directory instead.
+
+The archive already contains the required structure:
+
+```text
+fonts
+    modernz-icons.ttf
+
+script-opts
+    modernz.conf
+
+scripts
+    modernz.lua
+```
+
+No additional folders need to be created.
+
+### Configure mpv
+
+Open `mpv.conf` in the same mpv configuration directory used above.
+
+If `mpv.conf` does not exist, create a plain text file named exactly `mpv.conf`.
+
+Add:
+
+```text
+osc=no
+border=no # Optional, but recommended
+```
+
+`osc=no` disables the standard mpv interface so ModernZ can provide the player controls.
+
+`border=no` removes the native window border and is optional.
+
+The included ModernZ package is a modified version intended for use with Play. ModernZ remains subject to its own license.
+
 ## Requirements
 
-- Windows x64
-- Internet connection
-- mpv
+Windows x64
+
+Internet connection
+
+mpv
 
 ## License
 
-Licensed under the GNU General Public License v3.0 or later. See `LICENSE` for details.
+Play is licensed under the GNU General Public License version 3 or later. See `LICENSE` for details.
