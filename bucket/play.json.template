@@ -9,7 +9,7 @@
             "hash": "@SHA256@"
         }
     },
-    "depends": "https://raw.githubusercontent.com/ScoopInstaller/Extras/master/bucket/mpv.json",
+    "depends": "extras/mpv",
     "bin": "play.exe",
     "checkver": {
         "github": "@REPOSITORY_URL@"

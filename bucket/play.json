@@ -9,7 +9,7 @@
             "hash": "18f671e65dddc5c039c081fa7a14cf0f3fd49cb37a9b9c4256d9a0be4dd98d80"
         }
     },
-    "depends": "https://raw.githubusercontent.com/ScoopInstaller/Extras/master/bucket/mpv.json",
+    "depends": "extras/mpv",
     "bin": "play.exe",
     "checkver": {
         "github": "https://github.com/mustafachyi/Play"
