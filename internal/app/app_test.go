@@ -39,7 +39,7 @@ func testItem() media.Item {
 
 func testItemWithTitle(title string) media.Item {
 	return media.Item{
-		Title: title, Duration: 801, Thumbnail: "https://image/cover.jpg",
+		Title: title, Duration: 801, Thumbnails: []string{"https://image/cover.jpg", "https://image/cover-fallback.jpg"},
 		Videos: []media.Video{
 			{Stream: media.Stream{URL: "https://video/2160", MIME: `video/webm; codecs="vp9"`, Size: 21_600_000}, Quality: "2160p", Width: 3840, Height: 2160, FPS: 60, Bitrate: 20_000_000},
 			{Stream: media.Stream{URL: "https://video/1080", MIME: `video/webm; codecs="vp9"`, Size: 10_800_000}, Quality: "1080p", Width: 1920, Height: 1080, FPS: 60, Bitrate: 8_000_000},
@@ -246,11 +246,15 @@ func TestAudioOnlyUsesPreferredAudioThumbnailAndNoVideo(t *testing.T) {
 	if request.CoverURL != "http://127.0.0.1:1234/token/cover.jpg" || len(resources) != 5 {
 		t.Fatalf("cover=%q resources=%#v", request.CoverURL, resources)
 	}
+	cover := resources[len(resources)-1]
+	if cover.URL != "https://image/cover.jpg" || len(cover.FallbackURLs) != 1 || cover.FallbackURLs[0] != "https://image/cover-fallback.jpg" {
+		t.Fatalf("cover resource = %#v", cover)
+	}
 }
 
 func TestAudioOnlyDoesNotFailWithoutThumbnail(t *testing.T) {
 	item := testItem()
-	item.Thumbnail = ""
+	item.Thumbnails = nil
 	var request mpv.Request
 	deps := testDependencies(item, nil, &request, nil)
 	if err := run(context.Background(), "0.3.0", []string{"-a", appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps); err != nil {

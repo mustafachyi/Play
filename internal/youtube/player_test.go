@@ -63,6 +63,11 @@ func TestFetchPlayerKeepsInitialResponseWhenVisitorRetryFails(t *testing.T) {
 }
 
 func TestFetchPlayerResponsesUsesSuccessfulProfile(t *testing.T) {
+	originalProfiles := playerProfiles
+	playerProfiles = []clientProfile{originalProfiles[0], originalProfiles[0]}
+	playerProfiles[1].numericID = "test-success"
+	t.Cleanup(func() { playerProfiles = originalProfiles })
+
 	client := testClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Header.Get("X-YouTube-Client-Name") == playerProfiles[0].numericID {
 			return response(500, `{}`), nil
@@ -78,18 +83,27 @@ func TestFetchPlayerResponsesUsesSuccessfulProfile(t *testing.T) {
 	}
 }
 
-func TestParsePlayerResponsesRejectsLiveStream(t *testing.T) {
-	raw := []byte(`{"playabilityStatus":{"status":"OK","liveStreamability":{"liveStreamabilityRenderer":{}}},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Live"},"streamingData":{"adaptiveFormats":[]}}`)
+func TestParsePlayerResponsesRejectsCurrentLiveStream(t *testing.T) {
+	raw := []byte(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Live","isLive":true,"isLiveContent":true},"streamingData":{"adaptiveFormats":[]}}`)
 	_, err := parsePlayerResponses([][]byte{raw}, testVideoID)
 	if !errors.Is(err, ErrLiveUnsupported) {
 		t.Fatalf("error = %#v", err)
 	}
 }
 
-func TestParsePlayerResponsesAllowsPostLiveRecording(t *testing.T) {
+func TestParsePlayerResponsesRejectsCurrentLiveStreamFromMicroformatFallback(t *testing.T) {
+	raw := []byte(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Live"},"microformat":{"playerMicroformatRenderer":{"liveBroadcastDetails":{"isLiveNow":true}}},"streamingData":{"adaptiveFormats":[]}}`)
+	_, err := parsePlayerResponses([][]byte{raw}, testVideoID)
+	if !errors.Is(err, ErrLiveUnsupported) {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestParsePlayerResponsesAllowsCompletedLiveRecording(t *testing.T) {
 	raw := []byte(`{
-        "playabilityStatus":{"status":"OK"},
-        "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Archived live","isPostLiveDvr":true,"isLiveContent":true},
+        "playabilityStatus":{"status":"OK","liveStreamability":{"liveStreamabilityRenderer":{}}},
+        "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Archived live","isLive":false,"isPostLiveDvr":false,"isLiveContent":true},
+        "microformat":{"playerMicroformatRenderer":{"liveBroadcastDetails":{"isLiveNow":false}}},
         "streamingData":{"adaptiveFormats":[
             {"url":"https://video/720","mimeType":"video/mp4","height":720,"contentLength":"100"},
             {"url":"https://audio/en","mimeType":"audio/mp4","contentLength":"50","audioTrack":{"id":"en.1","displayName":"English"}}
@@ -101,6 +115,49 @@ func TestParsePlayerResponsesAllowsPostLiveRecording(t *testing.T) {
 	}
 	if item.Title != "Archived live" {
 		t.Fatalf("item = %#v", item)
+	}
+}
+
+func TestParsePlayerResponsesAllowsPostLiveRecordingWithUsableStreams(t *testing.T) {
+	raw := []byte(`{
+        "playabilityStatus":{"status":"OK"},
+        "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Post-live replay","isLive":false,"isPostLiveDvr":true,"isLiveContent":true},
+        "streamingData":{"adaptiveFormats":[
+            {"url":"https://video/720","mimeType":"video/mp4","height":720,"contentLength":"100"},
+            {"url":"https://audio/en","mimeType":"audio/mp4","contentLength":"50","audioTrack":{"id":"en.1","displayName":"English"}}
+        ]}
+    }`)
+	item, err := parsePlayerResponses([][]byte{raw}, testVideoID)
+	if err != nil || item.Title != "Post-live replay" {
+		t.Fatalf("item=%#v err=%v", item, err)
+	}
+}
+
+func TestParsePlayerResponsesExplicitNotLiveOverridesMicroformatFallback(t *testing.T) {
+	raw := []byte(`{
+        "playabilityStatus":{"status":"OK"},
+        "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Completed","isLive":false,"isLiveContent":true},
+        "microformat":{"playerMicroformatRenderer":{"liveBroadcastDetails":{"isLiveNow":true}}},
+        "streamingData":{"adaptiveFormats":[
+            {"url":"https://video/720","mimeType":"video/mp4","height":720,"contentLength":"100"},
+            {"url":"https://audio/en","mimeType":"audio/mp4","contentLength":"50","audioTrack":{"id":"en.1","displayName":"English"}}
+        ]}
+    }`)
+	item, err := parsePlayerResponses([][]byte{raw}, testVideoID)
+	if err != nil || item.Title != "Completed" {
+		t.Fatalf("item=%#v err=%v", item, err)
+	}
+}
+
+func TestParsePlayerResponsesDoesNotClassifyUpcomingStreamAsCurrentLive(t *testing.T) {
+	raw := []byte(`{"playabilityStatus":{"status":"LIVE_STREAM_OFFLINE","reason":"This live event will begin soon"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Upcoming","isLive":false,"isUpcoming":true,"isLiveContent":true},"microformat":{"playerMicroformatRenderer":{"liveBroadcastDetails":{"isLiveNow":false}}}}`)
+	_, err := parsePlayerResponses([][]byte{raw}, testVideoID)
+	if errors.Is(err, ErrLiveUnsupported) {
+		t.Fatalf("upcoming stream classified as current live: %v", err)
+	}
+	var playerErr *PlayerError
+	if !errors.As(err, &playerErr) || playerErr.Kind != Unplayable || playerErr.Status != "LIVE_STREAM_OFFLINE" {
+		t.Fatalf("error = %#v", err)
 	}
 }
 
@@ -132,7 +189,7 @@ func TestParsePlayerResponsesSelectsMetadataAndTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.Title != "Test title" || item.Duration != 801 || item.Thumbnail != "https://image/large.jpg" {
+	if item.Title != "Test title" || item.Duration != 801 || len(item.Thumbnails) == 0 || item.Thumbnails[0] != "https://image/large.jpg" {
 		t.Fatalf("item = %#v", item)
 	}
 	if len(item.Videos) != 3 || item.Videos[1].URL != "https://video/1080" || item.Videos[1].Bitrate != 5000 {
@@ -152,6 +209,52 @@ func TestParsePlayerResponsesSelectsMetadataAndTracks(t *testing.T) {
 	}
 	if len(item.Subtitles) != 2 || !strings.Contains(item.Subtitles[0].URL, "fmt=vtt") {
 		t.Fatalf("subtitles = %#v", item.Subtitles)
+	}
+}
+
+func TestParsePlayerResponsesPrefersHigherResolutionMicroformatThumbnail(t *testing.T) {
+	raw := []byte(`{
+        "playabilityStatus":{"status":"OK"},
+        "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Test","thumbnail":{"thumbnails":[
+            {"url":"https://image/video-details.jpg","width":480,"height":360}
+        ]}},
+        "microformat":{"playerMicroformatRenderer":{"thumbnail":{"thumbnails":[
+            {"url":"https://image/microformat.jpg","width":1280,"height":720}
+        ]}}},
+        "streamingData":{"adaptiveFormats":[
+            {"url":"https://video/720","mimeType":"video/mp4","height":720},
+            {"url":"https://audio/en","mimeType":"audio/mp4","audioTrack":{"id":"en.1","displayName":"English"}}
+        ]}
+    }`)
+	item, err := parsePlayerResponses([][]byte{raw}, testVideoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Thumbnails) == 0 || item.Thumbnails[0] != "https://image/microformat.jpg" {
+		t.Fatalf("thumbnails = %#v", item.Thumbnails)
+	}
+}
+
+func TestChooseThumbnailsAddsHigherResolutionCanonicalFallbacks(t *testing.T) {
+	responses := []playerResponse{{
+		VideoDetails: &videoDetails{Thumbnail: &thumbnailList{Thumbnails: []thumbnail{{
+			URL: "https://image/known.jpg", Width: flexibleInt{value: 480, set: true}, Height: flexibleInt{value: 360, set: true},
+		}}}},
+	}}
+	got := chooseThumbnails(responses, testVideoID)
+	wantPrefix := []string{
+		"https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+		"https://i.ytimg.com/vi/dQw4w9WgXcQ/hq720.jpg",
+		"https://i.ytimg.com/vi/dQw4w9WgXcQ/sddefault.jpg",
+		"https://image/known.jpg",
+	}
+	if len(got) < len(wantPrefix) {
+		t.Fatalf("thumbnails = %#v", got)
+	}
+	for i, want := range wantPrefix {
+		if got[i] != want {
+			t.Fatalf("thumbnail %d = %q; want %q; all=%#v", i, got[i], want, got)
+		}
 	}
 }
 

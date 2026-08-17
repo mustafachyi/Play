@@ -16,11 +16,12 @@ import (
 type Reporter func(string, error)
 
 type Resource struct {
-	Name   string
-	URL    string
-	MIME   string
-	Size   int64
-	Ranged bool
+	Name         string
+	URL          string
+	FallbackURLs []string
+	MIME         string
+	Size         int64
+	Ranged       bool
 }
 
 type Server struct {
@@ -173,7 +174,31 @@ func validateResource(resource Resource) error {
 	if resource.Size < 0 {
 		return errors.New("resource size is invalid")
 	}
-	u, err := url.Parse(resource.URL)
+	if resource.Ranged && len(resource.FallbackURLs) > 0 {
+		return errors.New("ranged resources cannot have fallback URLs")
+	}
+	if err := validateResourceURL(resource.URL); err != nil {
+		return err
+	}
+	if len(resource.FallbackURLs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(resource.FallbackURLs)+1)
+	seen[resource.URL] = struct{}{}
+	for _, value := range resource.FallbackURLs {
+		if _, exists := seen[value]; exists {
+			return errors.New("resource contains a duplicate URL")
+		}
+		if err := validateResourceURL(value); err != nil {
+			return err
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func validateResourceURL(value string) error {
+	u, err := url.Parse(value)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return errors.New("resource URL is not a valid HTTPS URL")
 	}

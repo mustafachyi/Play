@@ -129,24 +129,83 @@ func chooseSubtitles(responses []playerResponse) []media.Subtitle {
 	return subtitles
 }
 
-func chooseThumbnail(responses []playerResponse) string {
-	bestURL := ""
-	var bestWidth, bestHeight int64
-	for _, response := range responses {
-		if response.VideoDetails == nil || response.VideoDetails.Thumbnail == nil {
-			continue
+func chooseThumbnails(responses []playerResponse, videoID string) []string {
+	type candidate struct {
+		url    string
+		width  int64
+		height int64
+		known  bool
+		order  int
+	}
+
+	candidates := make([]candidate, 0)
+	order := 0
+	addList := func(list *thumbnailList) {
+		if list == nil {
+			return
 		}
-		for _, candidate := range response.VideoDetails.Thumbnail.Thumbnails {
-			if !validHTTPS(candidate.URL) {
+		for _, thumbnail := range list.Thumbnails {
+			if !validHTTPS(thumbnail.URL) {
 				continue
 			}
-			width, height := positive(candidate.Width), positive(candidate.Height)
-			if bestURL == "" || width > bestWidth || width == bestWidth && height > bestHeight {
-				bestURL, bestWidth, bestHeight = candidate.URL, width, height
-			}
+			candidates = append(candidates, candidate{
+				url: thumbnail.URL, width: positive(thumbnail.Width), height: positive(thumbnail.Height), known: true, order: order,
+			})
+			order++
 		}
 	}
-	return bestURL
+	for _, response := range responses {
+		if response.VideoDetails != nil {
+			addList(response.VideoDetails.Thumbnail)
+		}
+		if response.Microformat != nil && response.Microformat.Renderer != nil {
+			addList(response.Microformat.Renderer.Thumbnail)
+		}
+	}
+
+	if validVideoID(videoID) != "" {
+		for _, value := range []struct {
+			name   string
+			width  int64
+			height int64
+		}{
+			{name: "maxresdefault", width: 1280, height: 720},
+			{name: "hq720", width: 1280, height: 720},
+			{name: "sddefault", width: 640, height: 480},
+			{name: "hqdefault", width: 480, height: 360},
+			{name: "default", width: 120, height: 90},
+		} {
+			candidates = append(candidates, candidate{
+				url:   "https://i.ytimg.com/vi/" + videoID + "/" + value.name + ".jpg",
+				width: value.width, height: value.height, order: order,
+			})
+			order++
+		}
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].width != candidates[j].width {
+			return candidates[i].width > candidates[j].width
+		}
+		if candidates[i].height != candidates[j].height {
+			return candidates[i].height > candidates[j].height
+		}
+		if candidates[i].known != candidates[j].known {
+			return candidates[i].known
+		}
+		return candidates[i].order < candidates[j].order
+	})
+
+	urls := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if _, exists := seen[candidate.url]; exists {
+			continue
+		}
+		seen[candidate.url] = struct{}{}
+		urls = append(urls, candidate.url)
+	}
+	return urls
 }
 
 func videoCandidate(value format, order int) (rankedVideo, bool) {
@@ -265,11 +324,6 @@ func webVTTURL(value string) string {
 func validHTTPS(value string) bool {
 	u, err := url.Parse(value)
 	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil
-}
-
-func jsonValue(value json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(value)
-	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func hasDRM(value json.RawMessage) bool {

@@ -37,22 +37,6 @@ var playerProfiles = []clientProfile{
 			UTCOffsetMinutes: 0,
 		},
 	},
-	{
-		numericID: "28",
-		context: clientContext{
-			ClientName:       "ANDROID_VR",
-			ClientVersion:    "1.65.10",
-			DeviceMake:       "Oculus",
-			DeviceModel:      "Quest 3",
-			AndroidSDK:       32,
-			OSName:           "Android",
-			OSVersion:        "12L",
-			UserAgent:        "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-			HL:               "en",
-			TimeZone:         "UTC",
-			UTCOffsetMinutes: 0,
-		},
-	},
 }
 
 var browseProfile = clientProfile{

@@ -301,6 +301,35 @@ func TestAssetHandlerProxiesBodyAndMIME(t *testing.T) {
 	}
 }
 
+func TestAssetHandlerFallsBackWithoutRefetchingSuccessfulCandidate(t *testing.T) {
+	var requests []string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		switch r.URL.Path {
+		case "/high.jpg":
+			http.NotFound(w, r)
+		case "/fallback.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("fallback-image"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	handler := &assetHandler{client: upstream.Client(), source: Resource{
+		Name: "cover.jpg", URL: upstream.URL + "/high.jpg", FallbackURLs: []string{upstream.URL + "/fallback.jpg"},
+	}}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://local/cover.jpg", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "fallback-image" || recorder.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("response = %d %q %q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Content-Type"))
+	}
+	if !reflect.DeepEqual(requests, []string{"/high.jpg", "/fallback.jpg"}) {
+		t.Fatalf("requests = %#v", requests)
+	}
+}
+
 func TestEncodedUpstreamResponsesAreRejected(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Encoding", "gzip")
@@ -334,6 +363,9 @@ func TestValidateResource(t *testing.T) {
 		{Name: "x", URL: "http://example.com/x"},
 		{Name: "x", URL: "https://user@example.com/x"},
 		{Name: "x", URL: "https://example.com/x", Size: -1},
+		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"http://example.com/fallback"}},
+		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"https://example.com/x"}},
+		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"https://example.com/fallback"}, Ranged: true},
 	} {
 		if err := validateResource(resource); err == nil {
 			t.Fatalf("validateResource(%#v) unexpectedly succeeded", resource)

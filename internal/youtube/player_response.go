@@ -13,13 +13,13 @@ type playerResponse struct {
 	VideoDetails      *videoDetails      `json:"videoDetails"`
 	StreamingData     *streamingData     `json:"streamingData"`
 	Captions          *captions          `json:"captions"`
+	Microformat       *playerMicroformat `json:"microformat"`
 }
 
 type playabilityStatus struct {
-	Status            string          `json:"status"`
-	Reason            string          `json:"reason"`
-	Messages          []string        `json:"messages"`
-	LiveStreamability json.RawMessage `json:"liveStreamability"`
+	Status   string   `json:"status"`
+	Reason   string   `json:"reason"`
+	Messages []string `json:"messages"`
 }
 
 type videoDetails struct {
@@ -27,6 +27,20 @@ type videoDetails struct {
 	Title         string         `json:"title"`
 	LengthSeconds flexibleInt    `json:"lengthSeconds"`
 	Thumbnail     *thumbnailList `json:"thumbnail"`
+	IsLive        *bool          `json:"isLive"`
+}
+
+type playerMicroformat struct {
+	Renderer *playerMicroformatRenderer `json:"playerMicroformatRenderer"`
+}
+
+type playerMicroformatRenderer struct {
+	Thumbnail            *thumbnailList        `json:"thumbnail"`
+	LiveBroadcastDetails *liveBroadcastDetails `json:"liveBroadcastDetails"`
+}
+
+type liveBroadcastDetails struct {
+	IsLiveNow bool `json:"isLiveNow"`
 }
 
 type thumbnailList struct {
@@ -144,6 +158,16 @@ type rankedSubtitle struct {
 	order int
 }
 
+func currentlyLive(response playerResponse) bool {
+	if response.VideoDetails != nil && response.VideoDetails.IsLive != nil {
+		return *response.VideoDetails.IsLive
+	}
+	if response.Microformat == nil || response.Microformat.Renderer == nil || response.Microformat.Renderer.LiveBroadcastDetails == nil {
+		return false
+	}
+	return response.Microformat.Renderer.LiveBroadcastDetails.IsLiveNow
+}
+
 func parsePlayerResponses(rawResponses [][]byte, requestedVideoID string) (media.Item, error) {
 	responses := make([]playerResponse, 0, len(rawResponses))
 	for _, raw := range rawResponses {
@@ -157,7 +181,7 @@ func parsePlayerResponses(rawResponses [][]byte, requestedVideoID string) (media
 	}
 
 	for _, response := range responses {
-		if response.PlayabilityStatus != nil && jsonValue(response.PlayabilityStatus.LiveStreamability) {
+		if response.VideoDetails != nil && response.VideoDetails.VideoID == requestedVideoID && currentlyLive(response) {
 			return media.Item{}, ErrLiveUnsupported
 		}
 	}
@@ -226,11 +250,11 @@ func parsePlayerResponses(rawResponses [][]byte, requestedVideoID string) (media
 		return media.Item{}, &PlayerError{Kind: Protocol, Message: "YouTube returned no usable audio stream"}
 	}
 	return media.Item{
-		Title:     title,
-		Duration:  duration,
-		Thumbnail: chooseThumbnail(matched),
-		Videos:    videos,
-		Audios:    audios,
-		Subtitles: chooseSubtitles(matched),
+		Title:      title,
+		Duration:   duration,
+		Thumbnails: chooseThumbnails(matched, requestedVideoID),
+		Videos:     videos,
+		Audios:     audios,
+		Subtitles:  chooseSubtitles(matched),
 	}, nil
 }

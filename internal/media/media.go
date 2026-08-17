@@ -35,12 +35,12 @@ type Subtitle struct {
 }
 
 type Item struct {
-	Title     string
-	Duration  int64
-	Thumbnail string
-	Videos    []Video
-	Audios    []Audio
-	Subtitles []Subtitle
+	Title      string
+	Duration   int64
+	Thumbnails []string
+	Videos     []Video
+	Audios     []Audio
+	Subtitles  []Subtitle
 }
 
 type PlaylistItem struct {

@@ -120,9 +120,11 @@ func makePlaybackPlan(item media.Item, audioOnly bool) (playbackPlan, error) {
 		}})
 	}
 
-	if audioOnly && item.Thumbnail != "" {
-		plan.cover = "cover" + thumbnailExtension(item.Thumbnail)
-		plan.resources = append(plan.resources, stream.Resource{Name: plan.cover, URL: item.Thumbnail})
+	if audioOnly && len(item.Thumbnails) > 0 {
+		plan.cover = "cover" + thumbnailExtension(item.Thumbnails[0])
+		plan.resources = append(plan.resources, stream.Resource{
+			Name: plan.cover, URL: item.Thumbnails[0], FallbackURLs: item.Thumbnails[1:],
+		})
 	}
 	return plan, nil
 }

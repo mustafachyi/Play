@@ -37,7 +37,7 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	body, contentType, err := fetchAsset(r.Context(), h.client, h.source.URL)
+	body, contentType, err := fetchResourceAsset(r.Context(), h.client, h.source)
 	if err != nil {
 		if h.reporter != nil && r.Context().Err() == nil {
 			h.reporter(h.source.Name, err)
@@ -51,6 +51,20 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+func fetchResourceAsset(ctx context.Context, client *http.Client, source Resource) ([]byte, string, error) {
+	body, contentType, err := fetchAsset(ctx, client, source.URL)
+	if err == nil || ctx.Err() != nil {
+		return body, contentType, err
+	}
+	for _, sourceURL := range source.FallbackURLs {
+		body, contentType, err = fetchAsset(ctx, client, sourceURL)
+		if err == nil || ctx.Err() != nil {
+			return body, contentType, err
+		}
+	}
+	return nil, "", err
 }
 
 func fetchAsset(ctx context.Context, client *http.Client, sourceURL string) ([]byte, string, error) {
