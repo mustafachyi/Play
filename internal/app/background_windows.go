@@ -23,15 +23,15 @@ type workerRequest struct {
 	LogPath   string
 }
 
-func startBackground(ctx context.Context, reference youtube.Reference, audioOnly bool, out io.Writer) error {
+func startBackground(ctx context.Context, reference youtube.Reference, audioOnly bool) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate playback worker: %w", err)
 	}
-	return launchBackground(ctx, executable, reference, audioOnly, out)
+	return launchBackground(ctx, executable, reference, audioOnly)
 }
 
-func launchBackground(ctx context.Context, executable string, reference youtube.Reference, audioOnly bool, out io.Writer) error {
+func launchBackground(ctx context.Context, executable string, reference youtube.Reference, audioOnly bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -106,8 +106,7 @@ func launchBackground(ctx context.Context, executable string, reference youtube.
 	if err := command.Process.Release(); err != nil {
 		return fmt.Errorf("release playback worker: %w", err)
 	}
-	_, err = fmt.Fprintf(out, "Playback launched. Diagnostics: %s\n", logFile.Name())
-	return err
+	return nil
 }
 
 func RunWorker(ctx context.Context) (runErr error) {

@@ -30,7 +30,7 @@ type playlistSource interface {
 }
 
 type dependencies struct {
-	background          func(context.Context, youtube.Reference, bool, io.Writer) error
+	background          func(context.Context, youtube.Reference, bool) error
 	resolveVideo        func(context.Context, string) (media.Item, error)
 	openPlaylist        func(string) (playlistSource, error)
 	findMPV             func() (string, error)
@@ -102,7 +102,7 @@ func run(ctx context.Context, version string, args []string, in io.Reader, out, 
 		return err
 	}
 	if !opts.wait && deps.background != nil {
-		return deps.background(ctx, reference, opts.audioOnly, out)
+		return deps.background(ctx, reference, opts.audioOnly)
 	}
 	if reference.PlaylistID != "" {
 		return runPlaylist(ctx, reference, opts.audioOnly, mpvPath, errOut, deps)

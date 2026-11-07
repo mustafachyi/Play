@@ -53,6 +53,7 @@ func TestMain(m *testing.M) {
 func TestBackgroundReturnsWhileWorkerRemainsAlive(t *testing.T) {
 	t.Setenv("PLAY_TEST_WORKER", "success")
 	directory := t.TempDir()
+	t.Setenv("TMP", directory)
 	release := filepath.Join(directory, "release")
 	done := filepath.Join(directory, "done")
 	t.Setenv("PLAY_TEST_RELEASE", release)
@@ -64,11 +65,16 @@ func TestBackgroundReturnsWhileWorkerRemainsAlive(t *testing.T) {
 	var out strings.Builder
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := launchBackground(ctx, executable, youtube.Reference{VideoID: appTestID}, false, &out); err != nil {
+	deps := testDependencies(testItem(), nil, nil, nil)
+	deps.background = func(ctx context.Context, reference youtube.Reference, audioOnly bool) error {
+		return launchBackground(ctx, executable, reference, audioOnly)
+	}
+	if err := run(ctx, "test", []string{appTestID}, strings.NewReader(""), &out, io.Discard, deps); err != nil {
 		t.Fatal(err)
 	}
-	logPath := strings.TrimSpace(strings.TrimPrefix(out.String(), "Playback launched. Diagnostics: "))
-	t.Cleanup(func() { _ = os.Remove(logPath) })
+	if out.Len() != 0 {
+		t.Fatalf("successful launch produced output: %q", out.String())
+	}
 	if _, err := os.Stat(done); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("worker did not remain active after launch returned")
 	}
@@ -93,7 +99,7 @@ func TestBackgroundReturnsStartupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = launchBackground(context.Background(), executable, youtube.Reference{VideoID: appTestID}, true, io.Discard)
+	err = launchBackground(context.Background(), executable, youtube.Reference{VideoID: appTestID}, true)
 	if err == nil || !strings.Contains(err.Error(), "simulated startup failure") {
 		t.Fatalf("error=%v", err)
 	}
@@ -107,7 +113,7 @@ func TestBackgroundCancellationStopsWorker(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	err = launchBackground(ctx, executable, youtube.Reference{VideoID: appTestID}, false, io.Discard)
+	err = launchBackground(ctx, executable, youtube.Reference{VideoID: appTestID}, false)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error=%v", err)
 	}
@@ -116,7 +122,7 @@ func TestBackgroundCancellationStopsWorker(t *testing.T) {
 func TestWaitKeepsPlaybackInForeground(t *testing.T) {
 	deps := testDependencies(testItem(), nil, nil, nil)
 	background := false
-	deps.background = func(context.Context, youtube.Reference, bool, io.Writer) error {
+	deps.background = func(context.Context, youtube.Reference, bool) error {
 		background = true
 		return nil
 	}

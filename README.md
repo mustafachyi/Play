@@ -53,8 +53,6 @@ Playback runs in the background, leaving the terminal available. Close mpv to st
 | `-h`, `-help` | Show help |
 | `-version` | Show version |
 
-For background playback, Play prints the location of its diagnostic log.
-
 YouTube Mix playlists and live streams are not supported.
 
 ## ModernZ
