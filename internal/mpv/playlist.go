@@ -17,7 +17,7 @@ func RunPlaylist(ctx context.Context, request PlaylistRequest) error {
 	if err != nil {
 		return fmt.Errorf("create playlist integration script: %w", err)
 	}
-	runErr := exec.CommandContext(ctx, request.Executable, playlistArguments(request, scriptPath)...).Run()
+	runErr := runCommand(exec.CommandContext(ctx, request.Executable, playlistArguments(request, scriptPath)...), request.Started)
 	return errors.Join(normalizeRunError(ctx, runErr), removeTemp(scriptPath, "playlist integration script"))
 }
 

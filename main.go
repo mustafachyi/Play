@@ -10,9 +10,15 @@ import (
 	"play/internal/app"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--play-worker" {
+		if app.RunWorker(context.Background()) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	err := app.Run(ctx, version, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	stop()

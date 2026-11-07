@@ -140,6 +140,12 @@ type contentPlaybackContext struct {
 }
 
 func (c *Client) requestPlayer(ctx context.Context, profile clientProfile, videoID, visitorData string) ([]byte, error) {
+	return retryRequest(ctx, func() ([]byte, error) {
+		return c.requestPlayerOnce(ctx, profile, videoID, visitorData)
+	})
+}
+
+func (c *Client) requestPlayerOnce(ctx context.Context, profile clientProfile, videoID, visitorData string) ([]byte, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 

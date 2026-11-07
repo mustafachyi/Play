@@ -35,6 +35,7 @@ type Track struct {
 }
 
 type Request struct {
+	Started      func() error
 	Executable   string
 	Title        string
 	Duration     int64
@@ -44,6 +45,7 @@ type Request struct {
 }
 
 type PlaylistRequest struct {
+	Started      func() error
 	Executable   string
 	URL          string
 	PageURL      string
@@ -68,8 +70,22 @@ func Run(ctx context.Context, request Request) error {
 	if err != nil {
 		return fmt.Errorf("create playback description: %w", err)
 	}
-	runErr := exec.CommandContext(ctx, request.Executable, arguments(request, edlPath)...).Run()
+	runErr := runCommand(exec.CommandContext(ctx, request.Executable, arguments(request, edlPath)...), request.Started)
 	return errors.Join(normalizeRunError(ctx, runErr), removeTemp(edlPath, "playback description"))
+}
+
+func runCommand(command *exec.Cmd, started func() error) error {
+	if err := command.Start(); err != nil {
+		return err
+	}
+	if started != nil {
+		if err := started(); err != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			return err
+		}
+	}
+	return command.Wait()
 }
 
 func validateRequest(request Request) error {

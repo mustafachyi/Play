@@ -124,6 +124,12 @@ func (p *Playlist) Next(ctx context.Context) ([]media.PlaylistItem, bool, error)
 }
 
 func (c *Client) requestBrowse(ctx context.Context, continuation string) ([]byte, error) {
+	return retryRequest(ctx, func() ([]byte, error) {
+		return c.requestBrowseOnce(ctx, continuation)
+	})
+}
+
+func (c *Client) requestBrowseOnce(ctx context.Context, continuation string) ([]byte, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 

@@ -1,10 +1,72 @@
 package mpv
 
 import (
+	"context"
+	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("PLAY_TEST_MPV") == "wait" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	if os.Getenv("PLAY_TEST_MPV") == "exit" {
+		os.Exit(7)
+	}
+	os.Exit(m.Run())
+}
+
+func TestPlayerStartupFailureCleansTemporaryFiles(t *testing.T) {
+	t.Setenv("PLAY_TEST_MPV", "wait")
+	directory := t.TempDir()
+	t.Setenv("TMP", directory)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("startup acknowledgement failed")
+	started := func() error { return want }
+	request := testRequest()
+	request.Executable = executable
+	request.Started = started
+	if err := Run(context.Background(), request); !errors.Is(err, want) {
+		t.Fatalf("video error=%v", err)
+	}
+	playlist := PlaylistRequest{Executable: executable, URL: "http://127.0.0.1:1234/playlist.m3u", Started: started}
+	if err := RunPlaylist(context.Background(), playlist); !errors.Is(err, want) {
+		t.Fatalf("playlist error=%v", err)
+	}
+	files, err := os.ReadDir(directory)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("temporary files=%v error=%v", files, err)
+	}
+}
+
+func TestPlayerCancellationAndExitStatus(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest()
+	request.Executable = executable
+	t.Setenv("PLAY_TEST_MPV", "wait")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request.Started = func() error { cancel(); return nil }
+	if err := Run(ctx, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error=%v", err)
+	}
+	t.Setenv("PLAY_TEST_MPV", "exit")
+	request.Started = nil
+	if err := Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "code 7") {
+		t.Fatalf("exit error=%v", err)
+	}
+}
 
 func testRequest() Request {
 	return Request{

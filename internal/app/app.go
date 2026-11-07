@@ -19,6 +19,7 @@ const maxConsoleInput = 4096
 
 type options struct {
 	audioOnly bool
+	wait      bool
 	input     string
 	help      bool
 	version   bool
@@ -29,6 +30,7 @@ type playlistSource interface {
 }
 
 type dependencies struct {
+	background          func(context.Context, youtube.Reference, bool, io.Writer) error
 	resolveVideo        func(context.Context, string) (media.Item, error)
 	openPlaylist        func(string) (playlistSource, error)
 	findMPV             func() (string, error)
@@ -99,6 +101,9 @@ func run(ctx context.Context, version string, args []string, in io.Reader, out, 
 	if err != nil {
 		return err
 	}
+	if !opts.wait && deps.background != nil {
+		return deps.background(ctx, reference, opts.audioOnly, out)
+	}
 	if reference.PlaylistID != "" {
 		return runPlaylist(ctx, reference, opts.audioOnly, mpvPath, errOut, deps)
 	}
@@ -119,6 +124,7 @@ func resolveVideo(ctx context.Context, videoID string, deps dependencies) (media
 func defaultDependencies() dependencies {
 	source := youtube.NewClient()
 	return dependencies{
+		background:   startBackground,
 		resolveVideo: source.Video,
 		openPlaylist: func(playlistID string) (playlistSource, error) {
 			return source.Playlist(playlistID)
@@ -162,6 +168,11 @@ func parseArgs(args []string) (options, error) {
 	var opts options
 	for _, arg := range args {
 		switch arg {
+		case "-wait":
+			if opts.wait {
+				return options{}, errors.New("-wait may be specified only once")
+			}
+			opts.wait = true
 		case "-a":
 			if opts.audioOnly {
 				return options{}, errors.New("-a may be specified only once")
@@ -189,10 +200,10 @@ func parseArgs(args []string) (options, error) {
 			opts.input = arg
 		}
 	}
-	if opts.help && (opts.version || opts.audioOnly || opts.input != "") {
+	if opts.help && (opts.version || opts.audioOnly || opts.wait || opts.input != "") {
 		return options{}, errors.New("-help cannot be combined with playback options")
 	}
-	if opts.version && (opts.help || opts.audioOnly || opts.input != "") {
+	if opts.version && (opts.help || opts.audioOnly || opts.wait || opts.input != "") {
 		return options{}, errors.New("-version cannot be combined with playback options")
 	}
 	return opts, nil
@@ -267,6 +278,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  -a        Play audio only")
+	fmt.Fprintln(out, "  -wait     Keep the terminal attached until playback ends")
 	fmt.Fprintln(out, "  -h, -help Show help")
 	fmt.Fprintln(out, "  -version  Show version")
 }

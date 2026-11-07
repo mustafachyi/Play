@@ -28,7 +28,9 @@ jobs:
       - name: Verify
         run: |
           go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "go vet failed" }
           go test -count=1 ./...
+          if ($LASTEXITCODE -ne 0) { throw "go test failed" }
 
       - name: Build
         shell: pwsh
@@ -38,7 +40,9 @@ jobs:
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
           go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o dist/play.exe .
+          if ($LASTEXITCODE -ne 0) { throw "release build failed" }
           go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o dist/play-check.exe .
+          if ($LASTEXITCODE -ne 0) { throw "verification build failed" }
           $releaseHash = (Get-FileHash -Algorithm SHA256 dist/play.exe).Hash
           $checkHash = (Get-FileHash -Algorithm SHA256 dist/play-check.exe).Hash
           if ($releaseHash -ne $checkHash) {
