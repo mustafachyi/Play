@@ -1,12 +1,12 @@
 {
-    "version": "0.1.3",
+    "version": "0.1.4",
     "description": "Play YouTube videos and playlists with mpv on Windows.",
     "homepage": "https://github.com/mustafachyi/Play",
     "license": "GPL-3.0-or-later",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/mustafachyi/Play/releases/download/v0.1.3/play.exe",
-            "hash": "08c669127298820093a13ab8cc247005553b31488ba4e83fe902a8200e10d865"
+            "url": "https://github.com/mustafachyi/Play/releases/download/v0.1.4/play.exe",
+            "hash": "ebbc129808b1e7643cdb058aaaf842a8ca418e879cfe1b01178ef4840809af09"
         }
     },
     "depends": "extras/mpv",
