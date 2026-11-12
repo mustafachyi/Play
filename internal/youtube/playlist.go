@@ -3,6 +3,7 @@ package youtube
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,7 +31,7 @@ type browseRequest struct {
 type Playlist struct {
 	request      func(context.Context, string) ([]byte, error)
 	continuation string
-	seen         map[string]struct{}
+	seen         map[[sha256.Size]byte]struct{}
 	pages        int
 	items        int
 	done         bool
@@ -50,16 +51,22 @@ func newPlaylist(playlistID string, request func(context.Context, string) ([]byt
 	return &Playlist{
 		request:      request,
 		continuation: initialPlaylistContinuation(playlistID),
-		seen:         make(map[string]struct{}),
+		seen:         make(map[[sha256.Size]byte]struct{}),
 	}, nil
 }
 
 func (p *Playlist) Next(ctx context.Context) ([]media.PlaylistItem, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if p.done {
 		return nil, false, nil
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		if p.pages >= maxPlaylistPages {
 			return nil, false, errors.New("playlist returned too many continuation pages")
 		}
@@ -71,7 +78,8 @@ func (p *Playlist) Next(ctx context.Context) ([]media.PlaylistItem, bool, error)
 			}
 			return nil, false, nil
 		}
-		if _, exists := p.seen[continuation]; exists {
+		digest := sha256.Sum256([]byte(continuation))
+		if _, exists := p.seen[digest]; exists {
 			return nil, false, errors.New("playlist returned a repeated continuation")
 		}
 
@@ -84,15 +92,16 @@ func (p *Playlist) Next(ctx context.Context) ([]media.PlaylistItem, bool, error)
 			return nil, false, err
 		}
 
-		items := make([]media.PlaylistItem, 0, len(values))
+		remaining := maxPlaylistItems - p.items
+		items := make([]media.PlaylistItem, 0, min(len(values), remaining))
 		for _, value := range values {
 			item, ok := playlistItem(value)
 			if ok {
+				if len(items) >= remaining {
+					return nil, false, errors.New("playlist exceeds the 5,000-video limit")
+				}
 				items = append(items, item)
 			}
-		}
-		if p.items+len(items) > maxPlaylistItems {
-			return nil, false, errors.New("playlist exceeds the 5000-item safety limit")
 		}
 
 		next := playlistContinuationToken(values)
@@ -100,12 +109,15 @@ func (p *Playlist) Next(ctx context.Context) ([]media.PlaylistItem, bool, error)
 			if next == continuation {
 				return nil, false, errors.New("playlist returned a repeated continuation")
 			}
-			if _, exists := p.seen[next]; exists {
+			if _, exists := p.seen[sha256.Sum256([]byte(next))]; exists {
 				return nil, false, errors.New("playlist returned a repeated continuation")
 			}
 		}
 
-		p.seen[continuation] = struct{}{}
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		p.seen[digest] = struct{}{}
 		p.pages++
 		p.items += len(items)
 		p.continuation = next
@@ -207,6 +219,7 @@ func playlistContinuationItems(body []byte) ([]json.RawMessage, error) {
 		return nil, errors.New("invalid playlist response")
 	}
 
+	hasEmptyItems := false
 	for _, actions := range [][]playlistContinuationAction{
 		response.OnResponseReceivedActions,
 		response.OnResponseReceivedEndpoints,
@@ -218,6 +231,7 @@ func playlistContinuationItems(body []byte) ([]json.RawMessage, error) {
 			if len(action.AppendContinuationItemsAction.ContinuationItems) > 0 {
 				return action.AppendContinuationItemsAction.ContinuationItems, nil
 			}
+			hasEmptyItems = hasEmptyItems || action.ReloadContinuationItemsCommand.ContinuationItems != nil || action.AppendContinuationItemsAction.ContinuationItems != nil
 		}
 	}
 
@@ -228,7 +242,10 @@ func playlistContinuationItems(body []byte) ([]json.RawMessage, error) {
 	if len(fallback.Contents) > 0 {
 		return fallback.Contents, nil
 	}
-	return nil, nil
+	if hasEmptyItems || fallback.ContinuationItems != nil || fallback.Contents != nil {
+		return nil, nil
+	}
+	return nil, errors.New("invalid playlist response")
 }
 
 type playlistContinuationItem struct {

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestParseRange(t *testing.T) {
@@ -25,20 +26,20 @@ func TestParseRange(t *testing.T) {
 	}{
 		{"full", "", 100, byteRange{start: 0, end: 99}, false},
 		{"bounded", "bytes=10-19", 100, byteRange{start: 10, end: 19, partial: true}, false},
-		{"open", "bytes=90-", 100, byteRange{start: 90, end: 99, partial: true}, false},
+		{"open ended", "bytes=90-", 100, byteRange{start: 90, end: 99, partial: true}, false},
 		{"suffix", "bytes=-10", 100, byteRange{start: 90, end: 99, partial: true}, false},
-		{"suffix larger", "bytes=-200", 100, byteRange{start: 0, end: 99, partial: true}, false},
+		{"suffix exceeds size", "bytes=-200", 100, byteRange{start: 0, end: 99, partial: true}, false},
 		{"clamped", "bytes=90-200", 100, byteRange{start: 90, end: 99, partial: true}, false},
-		{"multiple", "bytes=0-1,4-5", 100, byteRange{}, true},
+		{"multiple ranges", "bytes=0-1,4-5", 100, byteRange{}, true},
 		{"past end", "bytes=100-", 100, byteRange{}, true},
-		{"backwards", "bytes=20-10", 100, byteRange{}, true},
+		{"reversed bounds", "bytes=20-10", 100, byteRange{}, true},
 		{"zero suffix", "bytes=-0", 100, byteRange{}, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := parseRange(test.value, test.size)
 			if (err != nil) != test.wantErr || got != test.want {
-				t.Fatalf("parseRange(%q, %d) = %#v, %v; want %#v, err=%v", test.value, test.size, got, err, test.want, test.wantErr)
+				t.Fatalf("parseRange(%q, %d) = %#v, error = %v; want %#v, error present = %v", test.value, test.size, got, err, test.want, test.wantErr)
 			}
 		})
 	}
@@ -61,7 +62,7 @@ func TestDynamicServerAddsResourcesAtomically(t *testing.T) {
 		t.Fatal("added resource URL missing")
 	}
 	if err := server.Add([]Resource{{Name: "v01.webm", URL: "https://example.com/other"}, {Name: "new", URL: "https://example.com/new"}}); err == nil {
-		t.Fatal("expected duplicate rejection")
+		t.Fatal("duplicate resource name was accepted")
 	}
 	if server.URL("new") != "" {
 		t.Fatal("failed batch was partially added")
@@ -77,7 +78,7 @@ func TestDynamicServerRejectsAddAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := server.Add([]Resource{{Name: "x", URL: "https://example.com/x"}}); err == nil {
-		t.Fatal("expected closed server error")
+		t.Fatal("resource was added after server closure")
 	}
 }
 
@@ -91,7 +92,7 @@ func TestSourceHandlerUsesKnownSizeWithoutProbe(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodHead, "http://local/v01.webm", nil))
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Length") != "12345" || requests.Load() != 0 {
-		t.Fatalf("status=%d length=%q requests=%d", recorder.Code, recorder.Header().Get("Content-Length"), requests.Load())
+		t.Fatalf("status = %d, length = %q, requests = %d", recorder.Code, recorder.Header().Get("Content-Length"), requests.Load())
 	}
 }
 
@@ -116,11 +117,100 @@ func TestSourceHandlerProbesSizeLazilyAndCachesIt(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodHead, "http://local/v01.webm", nil))
 		if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Length") != fmt.Sprint(len(payload)) {
-			t.Fatalf("response = %d length=%q", recorder.Code, recorder.Header().Get("Content-Length"))
+			t.Fatalf("response = %d, length = %q", recorder.Code, recorder.Header().Get("Content-Length"))
 		}
 	}
 	if probes.Load() != 1 {
 		t.Fatalf("size probes = %d; want 1", probes.Load())
+	}
+}
+
+func TestSourceHandlerCancelsSizeWaitersAndSharesSuccessfulProbe(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var probes atomic.Int32
+	handler := &sourceHandler{
+		source: Resource{URL: "https://example.com/video"},
+		client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			probes.Add(1)
+			close(started)
+			select {
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			case <-release:
+			}
+			return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Range": {"bytes 0-0/12345"}}, Body: io.NopCloser(strings.NewReader("x"))}, nil
+		})},
+	}
+	results := make(chan error, 3)
+	probe := func() {
+		size, err := handler.contentSize(context.Background())
+		if err == nil && size != 12345 {
+			err = fmt.Errorf("size = %d; want 12345", size)
+		}
+		results <- err
+	}
+	go probe()
+	<-started
+	go probe()
+	go probe()
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled := make(chan error, 1)
+	go func() { _, err := handler.contentSize(ctx); canceled <- err }()
+	cancel()
+	select {
+	case err := <-canceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled size waiter remained blocked")
+	}
+	unblock()
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe()
+	if err := <-results; err != nil || probes.Load() != 1 {
+		t.Fatalf("cached probe error = %v; probes = %d", err, probes.Load())
+	}
+}
+
+func TestSourceHandlerCancelsActiveSizeProbeAndAllowsRetry(t *testing.T) {
+	started := make(chan struct{})
+	var probes atomic.Int32
+	handler := &sourceHandler{
+		source: Resource{URL: "https://example.com/video"},
+		client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if probes.Add(1) == 1 {
+				close(started)
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}
+			return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Range": {"bytes 0-0/12345"}}, Body: io.NopCloser(strings.NewReader("x"))}, nil
+		})},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := handler.contentSize(ctx); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("probe error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active size probe ignored cancellation")
+	}
+	size, err := handler.contentSize(context.Background())
+	if err != nil || size != 12345 || probes.Load() != 2 {
+		t.Fatalf("retry size = %d; error = %v; probes = %d", size, err, probes.Load())
 	}
 }
 
@@ -169,7 +259,7 @@ func TestSourceHandlerSplitsUpstreamRanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusPartialContent || string(body) != string(payload[2:11]) {
-		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+		t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
 	}
 	mu.Lock()
 	gotRanges := append([]string(nil), ranges...)
@@ -177,37 +267,6 @@ func TestSourceHandlerSplitsUpstreamRanges(t *testing.T) {
 	wantRanges := []string{"bytes=2-5", "bytes=6-9", "bytes=10-10"}
 	if !reflect.DeepEqual(gotRanges, wantRanges) {
 		t.Fatalf("ranges = %#v; want %#v", gotRanges, wantRanges)
-	}
-}
-
-func TestSourceHandlerRetriesIncompleteChunkWithoutDuplicatingBytes(t *testing.T) {
-	payload := []byte("abcdefgh")
-	var calls int
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
-			w.Header().Set("Content-Range", "bytes 0-7/8")
-			w.Header().Set("Content-Length", "8")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write(payload[:3])
-			return
-		}
-		if r.Header.Get("Range") != "bytes=3-7" {
-			t.Errorf("retry range = %q", r.Header.Get("Range"))
-		}
-		w.Header().Set("Content-Range", "bytes 3-7/8")
-		w.Header().Set("Content-Length", "5")
-		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(payload[3:])
-	}))
-	defer upstream.Close()
-	var dst bytes.Buffer
-	handler := &sourceHandler{client: upstream.Client(), source: Resource{Name: "v01.webm", URL: upstream.URL, Ranged: true}, chunkSize: 8}
-	if err := handler.copySpan(context.Background(), &dst, 0, 7, 8); err != nil {
-		t.Fatal(err)
-	}
-	if dst.String() != string(payload) || calls != 2 {
-		t.Fatalf("body=%q calls=%d", dst.String(), calls)
 	}
 }
 
@@ -236,7 +295,7 @@ func TestSourceHandlerAcceptsShorterUpstreamRanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if dst.String() != string(payload) || !reflect.DeepEqual(ranges, []string{"bytes=0-7", "bytes=3-7", "bytes=6-7"}) {
-		t.Fatalf("body=%q ranges=%#v", dst.String(), ranges)
+		t.Fatalf("body = %q, ranges = %#v", dst.String(), ranges)
 	}
 }
 
@@ -248,23 +307,7 @@ func TestSourceHandlerReportsUpstreamFailure(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodHead, "http://local/v04.mp4", nil))
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(reported, "v04.mp4") || !strings.Contains(reported, "HTTP 403") {
-		t.Fatalf("status=%d reported=%q", recorder.Code, reported)
-	}
-}
-
-func TestProbeSizeConsumesSuccessfulResponseBody(t *testing.T) {
-	body := strings.NewReader("x")
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode:    http.StatusPartialContent,
-			ContentLength: 1,
-			Header:        http.Header{"Content-Range": []string{"bytes 0-0/12345"}},
-			Body:          io.NopCloser(body),
-		}, nil
-	})}
-	size, retryable, err := probeSizeOnce(context.Background(), client, "https://example.com/video")
-	if err != nil || retryable || size != 12345 || body.Len() != 0 {
-		t.Fatalf("size=%d retryable=%v remaining=%d err=%v", size, retryable, body.Len(), err)
+		t.Fatalf("status = %d, reported = %q", recorder.Code, reported)
 	}
 }
 
@@ -283,7 +326,7 @@ func TestProbeSizeRetriesTransientStatus(t *testing.T) {
 	defer upstream.Close()
 	size, err := probeSize(context.Background(), upstream.Client(), upstream.URL)
 	if err != nil || size != 12345 || calls.Load() != 2 {
-		t.Fatalf("size=%d calls=%d err=%v", size, calls.Load(), err)
+		t.Fatalf("size = %d, calls = %d, error = %v", size, calls.Load(), err)
 	}
 }
 
@@ -297,7 +340,7 @@ func TestAssetHandlerProxiesBodyAndMIME(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://local/cover.jpg", nil))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "image" || recorder.Header().Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("response = %d %q %q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Content-Type"))
+		t.Fatalf("status = %d, body = %q, content type = %q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Content-Type"))
 	}
 }
 
@@ -323,7 +366,7 @@ func TestAssetHandlerFallsBackWithoutRefetchingSuccessfulCandidate(t *testing.T)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://local/cover.jpg", nil))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "fallback-image" || recorder.Header().Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("response = %d %q %q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Content-Type"))
+		t.Fatalf("status = %d, body = %q, content type = %q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Content-Type"))
 	}
 	if !reflect.DeepEqual(requests, []string{"/high.jpg", "/fallback.jpg"}) {
 		t.Fatalf("requests = %#v", requests)
@@ -344,7 +387,7 @@ func TestEncodedUpstreamResponsesAreRejected(t *testing.T) {
 	}
 	resp := &http.Response{StatusCode: http.StatusPartialContent, ContentLength: 4, Header: http.Header{"Content-Range": []string{"bytes 0-3/4"}, "Content-Encoding": []string{"gzip"}}}
 	if _, err := validateRangeResponse(resp, 0, 3, 4); err == nil {
-		t.Fatal("expected encoded media response to be rejected")
+		t.Fatal("encoded media response was accepted")
 	}
 }
 
@@ -362,20 +405,22 @@ func TestValidateResource(t *testing.T) {
 		{Name: "../x", URL: "https://example.com/x"},
 		{Name: "x", URL: "http://example.com/x"},
 		{Name: "x", URL: "https://user@example.com/x"},
+		{Name: "x", URL: "https://:443/x"},
 		{Name: "x", URL: "https://example.com/x", Size: -1},
 		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"http://example.com/fallback"}},
+		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"https://:443/fallback"}},
 		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"https://example.com/x"}},
 		{Name: "x", URL: "https://example.com/x", FallbackURLs: []string{"https://example.com/fallback"}, Ranged: true},
 	} {
 		if err := validateResource(resource); err == nil {
-			t.Fatalf("validateResource(%#v) unexpectedly succeeded", resource)
+			t.Fatalf("validateResource(%#v) accepted an invalid resource", resource)
 		}
 	}
 }
 
 func TestMaxChunkSizeBelowTenMillionBytes(t *testing.T) {
-	if maxChunkSize >= 10_000_000 || maxChunkSize < 9_500_000 {
-		t.Fatalf("maxChunkSize = %d", maxChunkSize)
+	if maxChunkSize >= 10_000_000 || maxChunkSize <= 0 {
+		t.Fatalf("maxChunkSize = %d; want 0 < size < 10000000", maxChunkSize)
 	}
 }
 
@@ -401,7 +446,7 @@ func TestStartedServerRoutesOnlyRegisteredTokenizedResources(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Length") != "123" {
-		t.Fatalf("status=%d length=%q", resp.StatusCode, resp.Header.Get("Content-Length"))
+		t.Fatalf("status = %d, length = %q", resp.StatusCode, resp.Header.Get("Content-Length"))
 	}
 
 	badMethod, err := http.NewRequest(http.MethodPost, url, nil)

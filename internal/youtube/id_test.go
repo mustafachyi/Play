@@ -29,25 +29,25 @@ func TestParseReference(t *testing.T) {
 		{"invalid timestamp ignored", "https://youtube.com/watch?v=" + id + "&t=bad", Reference{VideoID: id}, true},
 		{"watch trailing slash", "https://youtube.com/watch/?v=" + id, Reference{VideoID: id}, true},
 		{"music", "https://music.youtube.com/watch?v=" + id, Reference{VideoID: id}, true},
-		{"short", "https://youtu.be/" + id + "?si=x", Reference{VideoID: id}, true},
-		{"short playlist", "https://youtu.be/" + id + "?list=" + list, Reference{VideoID: id, PlaylistID: list}, true},
+		{"short URL", "https://youtu.be/" + id + "?si=x", Reference{VideoID: id}, true},
+		{"short URL with playlist", "https://youtu.be/" + id + "?list=" + list, Reference{VideoID: id, PlaylistID: list}, true},
 		{"shorts", "https://www.youtube.com/shorts/" + id, Reference{VideoID: id}, true},
 		{"shorts playlist", "https://www.youtube.com/shorts/" + id + "?list=" + list, Reference{VideoID: id, PlaylistID: list}, true},
 		{"embed", "https://www.youtube-nocookie.com/embed/" + id, Reference{VideoID: id}, true},
 		{"live", "https://youtube.com/live/" + id + "?feature=share", Reference{VideoID: id}, true},
 		{"legacy", "http://youtube.com/v/" + id, Reference{VideoID: id}, true},
 		{"host case", "https://WWW.YOUTUBE.COM./watch?v=" + id, Reference{VideoID: id}, true},
-		{"invalid short list ignored on video", "https://youtube.com/watch?v=" + id + "&list=x", Reference{VideoID: id}, true},
-		{"invalid playlist list", "https://youtube.com/playlist?list=x", Reference{}, false},
-		{"bad id", "dQw4w9WgXc!", Reference{}, false},
+		{"invalid playlist ID ignored for video", "https://youtube.com/watch?v=" + id + "&list=x", Reference{VideoID: id}, true},
+		{"invalid playlist ID", "https://youtube.com/playlist?list=x", Reference{}, false},
+		{"invalid video ID", "dQw4w9WgXc!", Reference{}, false},
 		{"lookalike host", "https://youtube.com.example.org/watch?v=" + id, Reference{}, false},
 		{"unsupported scheme", "ftp://youtube.com/watch?v=" + id, Reference{}, false},
 		{"userinfo", "https://user@youtube.com/watch?v=" + id, Reference{}, false},
-		{"missing video", "https://youtube.com/watch", Reference{}, false},
-		{"playlist missing list", "https://youtube.com/playlist", Reference{}, false},
+		{"missing video ID", "https://youtube.com/watch", Reference{}, false},
+		{"missing playlist ID", "https://youtube.com/playlist", Reference{}, false},
 		{"clip", "https://youtube.com/clip/Ugkxabc", Reference{}, false},
 		{"bare host", "youtu.be/" + id, Reference{}, false},
-		{"too long", strings.Repeat("a", maxInputLength+1), Reference{}, false},
+		{"input exceeds length limit", strings.Repeat("a", maxInputLength+1), Reference{}, false},
 	}
 
 	for _, test := range tests {
@@ -82,7 +82,7 @@ func TestMixPlaylistID(t *testing.T) {
 func TestParseTimeRejectsInvalidValues(t *testing.T) {
 	for _, value := range []string{"", "-1", "1::2", "1m2", "1x", "1:99", "2m1h"} {
 		if _, ok := parseTime(value); ok {
-			t.Fatalf("parseTime(%q) unexpectedly succeeded", value)
+			t.Fatalf("parseTime(%q) accepted an invalid timestamp", value)
 		}
 	}
 }

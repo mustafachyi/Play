@@ -1,0 +1,14 @@
+{
+  "go.formatTool": "gofmt",
+  "go.formatFlags": [],
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "file",
+    "editor.detectIndentation": false,
+    "editor.insertSpaces": false,
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": false
+  }
+}

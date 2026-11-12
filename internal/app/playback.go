@@ -24,6 +24,7 @@ type playbackPlan struct {
 	resources []stream.Resource
 	tracks    []plannedTrack
 	cover     string
+	preview   string
 }
 
 func runVideo(ctx context.Context, reference youtube.Reference, audioOnly bool, mpvPath string, errOut io.Writer, deps dependencies) error {
@@ -49,27 +50,50 @@ func runVideo(ctx context.Context, reference youtube.Reference, audioOnly bool, 
 }
 
 func playbackRequest(item media.Item, startSeconds int64, plan playbackPlan, local gateway) (mpv.Request, error) {
+	request, err := makePlaybackMetadata(item, startSeconds, plan)
+	if err != nil {
+		return mpv.Request{}, err
+	}
+	if err := resolvePlaybackURLs(&request, plan, local); err != nil {
+		return mpv.Request{}, err
+	}
+	return request, nil
+}
+
+func makePlaybackMetadata(item media.Item, startSeconds int64, plan playbackPlan) (mpv.Request, error) {
 	request := mpv.Request{
 		Title:        item.Title,
 		Duration:     item.Duration,
 		StartSeconds: startSeconds,
 		Tracks:       make([]mpv.Track, 0, len(plan.tracks)),
+		Chapters:     item.Chapters,
 	}
 	for _, planned := range plan.tracks {
-		track := planned.track
-		track.URL = local.url(planned.name)
-		if track.URL == "" {
-			return mpv.Request{}, errors.New("local stream server returned an incomplete playback map")
+		request.Tracks = append(request.Tracks, planned.track)
+	}
+	return request, mpv.ValidateMetadata(request)
+}
+
+func resolvePlaybackURLs(request *mpv.Request, plan playbackPlan, local gateway) error {
+	for index, planned := range plan.tracks {
+		request.Tracks[index].URL = local.url(planned.name)
+		if request.Tracks[index].URL == "" {
+			return errors.New("local stream server did not provide a required playback URL")
 		}
-		request.Tracks = append(request.Tracks, track)
 	}
 	if plan.cover != "" {
 		request.CoverURL = local.url(plan.cover)
 		if request.CoverURL == "" {
-			return mpv.Request{}, errors.New("local stream server returned an incomplete playback map")
+			return errors.New("local stream server did not provide a required playback URL")
 		}
 	}
-	return request, nil
+	if plan.preview != "" {
+		request.PreviewURL = local.url(plan.preview)
+		if request.PreviewURL == "" {
+			return errors.New("local stream server did not provide a required playback URL")
+		}
+	}
+	return nil
 }
 
 func makePlaybackPlan(item media.Item, audioOnly bool) (playbackPlan, error) {
@@ -125,6 +149,17 @@ func makePlaybackPlan(item media.Item, audioOnly bool) (playbackPlan, error) {
 		plan.resources = append(plan.resources, stream.Resource{
 			Name: plan.cover, URL: item.Thumbnails[0], FallbackURLs: item.Thumbnails[1:],
 		})
+	}
+	var preview *stream.PreviewSource
+	if audioOnly && len(item.Thumbnails) > 0 {
+		preview = &stream.PreviewSource{ArtworkURLs: item.Thumbnails}
+	}
+	if !audioOnly && item.Storyboard != nil {
+		preview = &stream.PreviewSource{Storyboard: item.Storyboard}
+	}
+	if preview != nil {
+		plan.preview = "preview.json"
+		plan.resources = append(plan.resources, stream.Resource{Name: plan.preview, Preview: preview})
 	}
 	return plan, nil
 }

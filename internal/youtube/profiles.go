@@ -15,7 +15,6 @@ type clientContext struct {
 	UTCOffsetMinutes int    `json:"utcOffsetMinutes"`
 	DeviceMake       string `json:"deviceMake,omitempty"`
 	DeviceModel      string `json:"deviceModel,omitempty"`
-	AndroidSDK       int    `json:"androidSdkVersion,omitempty"`
 	OSName           string `json:"osName,omitempty"`
 	OSVersion        string `json:"osVersion,omitempty"`
 	VisitorData      string `json:"visitorData,omitempty"`

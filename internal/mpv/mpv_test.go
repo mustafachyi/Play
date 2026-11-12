@@ -35,15 +35,15 @@ func TestPlayerStartupFailureCleansTemporaryFiles(t *testing.T) {
 	request.Executable = executable
 	request.Started = started
 	if err := Run(context.Background(), request); !errors.Is(err, want) {
-		t.Fatalf("video error=%v", err)
+		t.Fatalf("video error = %v", err)
 	}
-	playlist := PlaylistRequest{Executable: executable, URL: "http://127.0.0.1:1234/playlist.m3u", Started: started}
+	playlist := PlaylistRequest{Executable: executable, URL: "http://127.0.0.1:1234/playlist.m3u", PageURL: "http://127.0.0.1:1234/token/page/", Started: started}
 	if err := RunPlaylist(context.Background(), playlist); !errors.Is(err, want) {
-		t.Fatalf("playlist error=%v", err)
+		t.Fatalf("playlist error = %v", err)
 	}
 	files, err := os.ReadDir(directory)
 	if err != nil || len(files) != 0 {
-		t.Fatalf("temporary files=%v error=%v", files, err)
+		t.Fatalf("temporary files = %v, error = %v", files, err)
 	}
 }
 
@@ -59,12 +59,12 @@ func TestPlayerCancellationAndExitStatus(t *testing.T) {
 	defer cancel()
 	request.Started = func() error { cancel(); return nil }
 	if err := Run(ctx, request); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancellation error=%v", err)
+		t.Fatalf("cancellation error = %v; want context.Canceled", err)
 	}
 	t.Setenv("PLAY_TEST_MPV", "exit")
 	request.Started = nil
 	if err := Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "code 7") {
-		t.Fatalf("exit error=%v", err)
+		t.Fatalf("exit error = %v; want exit code 7", err)
 	}
 }
 
@@ -90,27 +90,40 @@ func TestBuildEDLUsesDelayedTracksMetadataAndDefaults(t *testing.T) {
 	if !strings.HasPrefix(edl, "# mpv EDL v0\n") {
 		t.Fatalf("EDL header missing: %q", edl)
 	}
-	if strings.Count(edl, "!delay_open") != 4 || strings.Count(edl, "!new_stream") != 4 {
-		t.Fatalf("EDL does not expose all tracks lazily:\n%s", edl)
+	main, subtitles := splitEDLSubtitles(t, edl)
+	if strings.Count(main, "!delay_open") != 2 || strings.Count(main, "!new_stream") != 3 {
+		t.Fatalf("main EDL does not expose the audio anchor and delayed A/V alternatives:\n%s", main)
+	}
+	if !strings.HasPrefix(subtitles, "edl://") || strings.Count(subtitles, "!delay_open") != 1 || strings.Count(subtitles, "!new_stream") != 1 {
+		t.Fatalf("external subtitle EDL is invalid:\n%s", subtitles)
 	}
 	for _, want := range []string{
 		"!global_tags,title=%12%Actual title",
 		"!delay_open,media_type=video,codec=vp9,w=1920,h=1080,fps=60",
 		"!track_meta,title=%5%1080p,byterate=1000000,flags=default",
-		"!delay_open,media_type=audio,codec=opus,samplerate=48000",
 		"!track_meta,title=%21%English (US) original,lang=%5%en-US,byterate=16000,flags=default",
+		"length=801",
+	} {
+		if !strings.Contains(main, want) {
+			t.Fatalf("main EDL missing %q:\n%s", want, main)
+		}
+	}
+	for _, want := range []string{
 		"!delay_open,media_type=sub,codec=webvtt",
 		"!track_meta,title=%24%English (auto-generated),lang=%2%en,flags=default",
 		"length=801",
 	} {
-		if !strings.Contains(edl, want) {
-			t.Fatalf("EDL missing %q:\n%s", want, edl)
+		if !strings.Contains(subtitles, want) {
+			t.Fatalf("subtitle EDL missing %q:\n%s", want, subtitles)
 		}
 	}
-	if strings.Count(edl, "flags=default") != 3 {
-		t.Fatalf("default flag count = %d", strings.Count(edl, "flags=default"))
+	if strings.Count(main, "flags=default") != 2 || strings.Count(subtitles, "flags=default") != 1 {
+		t.Fatalf("default flag counts: main = %d, subtitles = %d; want 2, 1", strings.Count(main, "flags=default"), strings.Count(subtitles, "flags=default"))
 	}
-	for _, line := range strings.Split(edl, "\n") {
+	if strings.Contains(main, "media_type=sub") || strings.Contains(subtitles, "media_type=video") || strings.Contains(subtitles, "media_type=audio") {
+		t.Fatalf("media and subtitles share an EDL:\n%s", edl)
+	}
+	for _, line := range strings.Split(main+subtitles, "\n") {
 		if strings.HasPrefix(line, "!delay_open") && strings.Contains(line, "flags=default") {
 			t.Fatalf("delay_open contains default flag: %q", line)
 		}
@@ -131,6 +144,10 @@ func TestEDLDoesNotRequireExecutable(t *testing.T) {
 func TestVideoArgumentsKeepWindowAndSelectionStable(t *testing.T) {
 	got := arguments(testRequest(), `C:\Temp\play-123.edl`)
 	want := []string{
+		"--autofit=70%x70%",
+		"--geometry=50%:50%",
+		"--auto-window-resize=yes",
+		"--keepaspect-window=yes",
 		"--terminal=no",
 		"--ytdl=no",
 		"--vid=auto",
@@ -146,6 +163,36 @@ func TestVideoArgumentsKeepWindowAndSelectionStable(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("arguments = %#v; want %#v", got, want)
+	}
+}
+
+func TestEveryPlaybackModeFitsMediaWithoutWindowPadding(t *testing.T) {
+	video := testRequest()
+	audio := Request{Title: "Audio", Tracks: []Track{{Kind: Audio}}}
+	artwork := audio
+	artwork.CoverURL = "http://127.0.0.1:1234/cover.jpg"
+	for name, args := range map[string][]string{
+		"video":          arguments(video, "video.edl"),
+		"audio":          arguments(audio, "audio.edl"),
+		"artwork":        arguments(artwork, "artwork.edl"),
+		"video playlist": playlistArguments(PlaylistRequest{}, "playlist.lua"),
+		"audio playlist": playlistArguments(PlaylistRequest{AudioOnly: true}, "playlist.lua"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, expected := range []string{"--autofit=70%x70%", "--geometry=50%:50%", "--auto-window-resize=yes", "--keepaspect-window=yes"} {
+				if !contains(args, expected) {
+					t.Fatalf("window policy missing %q: %v", expected, args)
+				}
+			}
+			for _, argument := range args {
+				if strings.HasPrefix(argument, "--geometry=") && argument != "--geometry=50%:50%" {
+					t.Fatalf("window dimensions override the media aspect: %v", args)
+				}
+				if strings.HasPrefix(argument, "--panscan=") || strings.HasPrefix(argument, "--video-aspect-override=") {
+					t.Fatalf("window policy must not crop or stretch media: %v", args)
+				}
+			}
+		})
 	}
 }
 
@@ -192,7 +239,7 @@ func TestPlaylistVideoArgumentsUseDefaultTrackSelection(t *testing.T) {
 }
 
 func TestPlaylistScriptAppliesPerItemTitleCoverAndStartBeforeLoad(t *testing.T) {
-	script := playlistScript(2, 90, true, "http://127.0.0.1:1234/token/page/")
+	script := playlistScript(2, 90, true, "http://127.0.0.1:1234/token/page/", "play.exe", "C:/pages", "http://127.0.0.1:1234/token/item/")
 	for _, want := range []string{
 		`track.type == "video" and not track.albumart`,
 		`mp.add_key_binding("_", "play-cycle-video", cycle_video)`,
@@ -213,9 +260,9 @@ func TestPlaylistScriptAppliesPerItemTitleCoverAndStartBeforeLoad(t *testing.T) 
 		`file-local-options/force-media-title`,
 		`local page_url = "http://127.0.0.1:1234/token/page/"`,
 		`mp.register_event("file-loaded", start_pagination)`,
-		`mp.command_native_async({"loadlist", url, "append"}`,
+		`name = "subprocess", args = {helper_path, "-playlist-page", page_url .. filename, page_directory}`,
 		`playlist-count`,
-		`string.format("%s%04d.m3u", page_url, next_page)`,
+		`string.format("%04d.m3u", next_page)`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
@@ -232,7 +279,7 @@ func TestPlaylistScriptAppliesPerItemTitleCoverAndStartBeforeLoad(t *testing.T) 
 }
 
 func TestPlaylistVideoScriptDoesNotEnableAudioCoverPath(t *testing.T) {
-	script := playlistScript(0, 0, false, "")
+	script := playlistScript(0, 0, false, "", "play.exe", "", "http://127.0.0.1:1234/token/item/")
 	if !strings.Contains(script, `local audio_only = false`) {
 		t.Fatalf("script = %s", script)
 	}
@@ -262,13 +309,13 @@ func TestValidationRejectsNonLocalURLs(t *testing.T) {
 	request := testRequest()
 	request.Tracks[0].URL = "https://rr.googlevideo.com/video"
 	if err := validateRequest(request); err == nil {
-		t.Fatal("expected direct upstream URL to be rejected")
+		t.Fatal("direct upstream URL was accepted")
 	}
 	if err := validatePlaylistRequest(PlaylistRequest{Executable: `C:\mpv\mpv.exe`, URL: "https://youtube.com/playlist"}); err == nil {
-		t.Fatal("expected non-local playlist to be rejected")
+		t.Fatal("non-local playlist URL was accepted")
 	}
 	if err := validatePlaylistRequest(PlaylistRequest{Executable: `C:\mpv\mpv.exe`, URL: "http://127.0.0.1:1/playlist.m3u", PageURL: "https://youtube.com/page/"}); err == nil {
-		t.Fatal("expected non-local playlist page URL to be rejected")
+		t.Fatal("non-local playlist page URL was accepted")
 	}
 }
 
@@ -308,17 +355,60 @@ func TestMediaRequestValidationRejectsInvalidFields(t *testing.T) {
 	}
 	for _, request := range cases {
 		if err := validateRequest(request); err == nil {
-			t.Fatalf("request unexpectedly valid: %#v", request)
+			t.Fatalf("invalid request was accepted: %#v", request)
 		}
 	}
 	request := base
 	request.Tracks[0].Kind = "bad"
 	if err := validateRequest(request); err == nil {
-		t.Fatal("invalid track kind accepted")
+		t.Fatal("invalid track kind was accepted")
 	}
-	request = base
+	request = testRequest()
 	request.CoverURL = "https://example.com/cover.jpg"
 	if err := validateRequest(request); err == nil {
-		t.Fatal("non-local cover URL accepted")
+		t.Fatal("non-local cover URL was accepted")
+	}
+}
+
+func TestMediaRequestRejectsNativeStringTruncation(t *testing.T) {
+	for _, field := range []string{"title", "track title", "track language"} {
+		t.Run(field, func(t *testing.T) {
+			request := testRequest()
+			switch field {
+			case "title":
+				request.Title = "Main\x00title"
+			case "track title":
+				request.Tracks[0].Title = "Track\x00title"
+			case "track language":
+				request.Tracks[0].Language = "en\x00US"
+			}
+			if err := ValidateMetadata(request); err == nil {
+				t.Fatal("metadata preflight accepted truncated native strings")
+			}
+			if err := validateRequest(request); err == nil {
+				t.Fatal("accepted metadata that is truncated by native mpv")
+			}
+			if _, err := EDL(request); err == nil {
+				t.Fatal("published an EDL with truncated native metadata")
+			}
+		})
+	}
+}
+
+func TestMetadataValidationPrecedesLocalURLPublication(t *testing.T) {
+	request := testRequest()
+	request.Executable = ""
+	for index := range request.Tracks {
+		request.Tracks[index].URL = ""
+	}
+	if err := ValidateMetadata(request); err != nil {
+		t.Fatalf("metadata preflight requires unpublished local URLs: %v", err)
+	}
+	if _, err := EDL(request); err == nil {
+		t.Fatal("EDL publication accepted missing local URLs")
+	}
+	request.Tracks[0].Kind = "invalid"
+	if err := ValidateMetadata(request); err == nil {
+		t.Fatal("metadata preflight accepted an invalid track type")
 	}
 }

@@ -1,0 +1,42 @@
+name: Formatting
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gofmt:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet and test
+        shell: pwsh
+        run: |
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "go vet failed" }
+          go test -count=1 -timeout=3m ./...
+          if ($LASTEXITCODE -ne 0) { throw "go test failed" }

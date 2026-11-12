@@ -312,7 +312,7 @@ func (t displayText) String() string {
 
 func webVTTURL(value string) string {
 	u, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return ""
 	}
 	query := u.Query()
@@ -323,12 +323,18 @@ func webVTTURL(value string) string {
 
 func validHTTPS(value string) bool {
 	u, err := url.Parse(value)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
 }
 
 func hasDRM(value json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(value)
-	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte("[]"))
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']' {
+		return len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) > 0
+	}
+	return true
 }
 
 func positive(value flexibleInt) int64 {

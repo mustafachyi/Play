@@ -55,6 +55,43 @@ func TestReferencedPlaylistFetchesVideoAndPlaylistConcurrently(t *testing.T) {
 	}
 }
 
+func TestPlaylistStartRejectsEmptyContinuationPage(t *testing.T) {
+	var calls int
+	source := playlistSourceFunc(func(context.Context) ([]media.PlaylistItem, bool, error) {
+		calls++
+		if calls > 1 {
+			return testPlaylistItems(), false, nil
+		}
+		return nil, true, nil
+	})
+	_, _, _, err := resolvePlaylistStart(context.Background(), youtube.Reference{}, source)
+	if err == nil || calls != 1 {
+		t.Fatalf("error = %v, calls = %d; want rejection without advancing", err, calls)
+	}
+}
+
+func TestPlaylistStartCancellationDoesNotReadOrPublishPages(t *testing.T) {
+	for _, cancelDuringRead := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelDuringRead), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			source := playlistSourceFunc(func(context.Context) ([]media.PlaylistItem, bool, error) {
+				calls++
+				cancel()
+				return testPlaylistItems(), false, nil
+			})
+			if !cancelDuringRead {
+				cancel()
+			}
+			items, _, _, err := resolvePlaylistStart(ctx, youtube.Reference{}, source)
+			if !errors.Is(err, context.Canceled) || len(items) != 0 || calls != map[bool]int{false: 0, true: 1}[cancelDuringRead] {
+				t.Fatalf("items = %v, calls = %d, error = %v", items, calls, err)
+			}
+		})
+	}
+}
+
 func TestReferencedPlaylistErrorCancelsConcurrentWork(t *testing.T) {
 	deps := testDependencies(testItem(), nil, nil, nil)
 	playlistStarted := make(chan struct{})
@@ -71,7 +108,7 @@ func TestReferencedPlaylistErrorCancelsConcurrentWork(t *testing.T) {
 	}
 	_, _, _, _, err := resolveReferencedPlaylist(context.Background(), youtube.Reference{VideoID: appTestID, PlaylistID: "PL123"}, source, deps)
 	if !errors.Is(err, youtube.ErrLiveUnsupported) {
-		t.Fatalf("err = %v", err)
+		t.Fatalf("error = %v", err)
 	}
 	select {
 	case <-playlistCanceled:
@@ -145,7 +182,7 @@ func TestPlaylistSelectedLiveStreamStopsBeforeServers(t *testing.T) {
 	}
 	err := run(context.Background(), "0.1.0", []string{"https://youtube.com/playlist?list=PL1234567890"}, strings.NewReader(""), io.Discard, io.Discard, deps)
 	if !errors.Is(err, youtube.ErrLiveUnsupported) || started || played {
-		t.Fatalf("err=%v started=%v played=%v", err, started, played)
+		t.Fatalf("error = %v, started = %v, played = %v", err, started, played)
 	}
 }
 
@@ -238,7 +275,7 @@ func TestPlaylistMixIsRejectedBeforeMPVLookup(t *testing.T) {
 	}
 	err := run(context.Background(), "0.1.0", []string{"https://youtube.com/watch?v=" + appTestID + "&list=RD" + appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps)
 	if err == nil || err.Error() != "YouTube Mix playlists are not supported" || lookedUp {
-		t.Fatalf("err=%v lookedUp=%v", err, lookedUp)
+		t.Fatalf("error = %v, lookup attempted = %v", err, lookedUp)
 	}
 }
 
@@ -308,7 +345,7 @@ func TestPlaylistStartsAfterFirstPageAndLoadsRemainingPagesOnDemand(t *testing.T
 			return err
 		}
 		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "#EXTINF:-1,Third") || !strings.Contains(string(body), "/item/0003.edl") || calls != 2 {
-			return fmt.Errorf("page2 status=%d body=%q calls=%d", resp.StatusCode, body, calls)
+			return fmt.Errorf("page2 status = %d, body = %q, calls = %d", resp.StatusCode, body, calls)
 		}
 
 		resp, err = http.Get(request.PageURL + "0003.m3u")
@@ -321,7 +358,7 @@ func TestPlaylistStartsAfterFirstPageAndLoadsRemainingPagesOnDemand(t *testing.T
 			return err
 		}
 		if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "#EXTM3U" || calls != 2 {
-			return fmt.Errorf("terminal page status=%d body=%q calls=%d", resp.StatusCode, body, calls)
+			return fmt.Errorf("terminal page status = %d, body = %q, calls = %d", resp.StatusCode, body, calls)
 		}
 		return nil
 	}
@@ -359,7 +396,7 @@ func TestPlaylistBackgroundPageFailureIsReported(t *testing.T) {
 	if err := run(context.Background(), "0.1.0", []string{"https://youtube.com/playlist?list=PL1234567890"}, strings.NewReader(""), io.Discard, &diagnostics, deps); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(diagnostics.String(), "play: playlist: resolve playlist: continuation failed") {
+	if !strings.Contains(diagnostics.String(), "play: playlist: load playlist: continuation failed") {
 		t.Fatalf("diagnostics = %q", diagnostics.String())
 	}
 }
@@ -378,7 +415,7 @@ func TestPlaylistStartResolutionFetchesOnlyThroughReferencedPage(t *testing.T) {
 	})
 	items, index, more, err := resolvePlaylistStart(context.Background(), youtubeReference("ddddddddddd", 4), source)
 	if err != nil || index != 3 || !more || calls != 2 || len(items) != 4 {
-		t.Fatalf("items=%#v index=%d more=%v calls=%d err=%v", items, index, more, calls, err)
+		t.Fatalf("items = %#v, index = %d, more = %v, calls = %d, error = %v", items, index, more, calls, err)
 	}
 }
 
@@ -386,14 +423,14 @@ func TestPlaylistStartIndexUsesIndexThenVideoFallback(t *testing.T) {
 	items := testPlaylistItems()
 	index, ready, err := playlistStartIndex(items, youtubeReference("bbbbbbbbbbb", 2), true)
 	if err != nil || !ready || index != 1 {
-		t.Fatalf("index=%d ready=%v err=%v", index, ready, err)
+		t.Fatalf("index = %d, ready = %v, error = %v", index, ready, err)
 	}
 	index, ready, err = playlistStartIndex(items, youtubeReference("ccccccccccc", 2), true)
 	if err != nil || !ready || index != 2 {
-		t.Fatalf("fallback index=%d ready=%v err=%v", index, ready, err)
+		t.Fatalf("fallback index = %d, ready = %v, error = %v", index, ready, err)
 	}
 	if _, ready, err := playlistStartIndex(items[:1], youtubeReference("ccccccccccc", 3), false); err != nil || ready {
-		t.Fatalf("partial playlist ready=%v err=%v", ready, err)
+		t.Fatalf("partial playlist ready = %v, error = %v", ready, err)
 	}
 }
 

@@ -25,6 +25,15 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
       - name: Verify
         run: |
           go vet ./...

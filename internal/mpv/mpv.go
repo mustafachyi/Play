@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"play/internal/media"
 )
 
 type TrackKind string
@@ -42,6 +45,8 @@ type Request struct {
 	StartSeconds int64
 	Tracks       []Track
 	CoverURL     string
+	PreviewURL   string
+	Chapters     []media.Chapter
 }
 
 type PlaylistRequest struct {
@@ -70,8 +75,21 @@ func Run(ctx context.Context, request Request) error {
 	if err != nil {
 		return fmt.Errorf("create playback description: %w", err)
 	}
-	runErr := runCommand(exec.CommandContext(ctx, request.Executable, arguments(request, edlPath)...), request.Started)
-	return errors.Join(normalizeRunError(ctx, runErr), removeTemp(edlPath, "playback description"))
+	scriptPath := ""
+	args := arguments(request, edlPath)
+	if len(request.Chapters) > 0 || (hasTrackKind(request.Tracks, Subtitle) && (hasTrackKind(request.Tracks, Audio) || hasTrackKind(request.Tracks, Video))) {
+		scriptPath, err = writeScript(subtitleScript(edlPath, true) + chapterScript(edlPath, true))
+		if err != nil {
+			return errors.Join(fmt.Errorf("create playback integration script: %w", err), removeTemp(edlPath, "playback description"))
+		}
+		args = append([]string{"--script=" + scriptPath}, args...)
+	}
+	runErr := runCommand(exec.CommandContext(ctx, request.Executable, args...), request.Started)
+	cleanupErr := removeTemp(edlPath, "playback description")
+	if scriptPath != "" {
+		cleanupErr = errors.Join(cleanupErr, removeTemp(scriptPath, "playback integration script"))
+	}
+	return errors.Join(normalizeRunError(ctx, runErr), cleanupErr)
 }
 
 func runCommand(command *exec.Cmd, started func() error) error {
@@ -95,9 +113,12 @@ func validateRequest(request Request) error {
 	return validateMediaRequest(request)
 }
 
-func validateMediaRequest(request Request) error {
+func ValidateMetadata(request Request) error {
 	if strings.TrimSpace(request.Title) == "" {
 		return errors.New("media title is empty")
+	}
+	if strings.ContainsRune(request.Title, '\x00') {
+		return errors.New("media title contains a null character")
 	}
 	if len(request.Tracks) == 0 {
 		return errors.New("no media tracks were provided")
@@ -106,9 +127,26 @@ func validateMediaRequest(request Request) error {
 		return errors.New("media timing is invalid")
 	}
 	for _, track := range request.Tracks {
+		if strings.ContainsRune(track.Title, '\x00') || strings.ContainsRune(track.Language, '\x00') {
+			return errors.New("media track metadata contains a null character")
+		}
 		if track.Kind != Video && track.Kind != Audio && track.Kind != Subtitle {
 			return errors.New("media track type is invalid")
 		}
+	}
+	for index, chapter := range request.Chapters {
+		if strings.TrimSpace(chapter.Title) == "" || strings.ContainsRune(chapter.Title, '\x00') || math.IsNaN(chapter.Time) || math.IsInf(chapter.Time, 0) || chapter.Time < 0 || (request.Duration > 0 && chapter.Time >= float64(request.Duration)) || (index > 0 && chapter.Time <= request.Chapters[index-1].Time) {
+			return errors.New("media chapters are invalid")
+		}
+	}
+	return nil
+}
+
+func validateMediaRequest(request Request) error {
+	if err := ValidateMetadata(request); err != nil {
+		return err
+	}
+	for _, track := range request.Tracks {
 		if !localHTTPURL(track.URL) {
 			return errors.New("mpv track URLs must use the local stream server")
 		}
@@ -116,7 +154,19 @@ func validateMediaRequest(request Request) error {
 	if request.CoverURL != "" && !localHTTPURL(request.CoverURL) {
 		return errors.New("mpv cover URL must use the local stream server")
 	}
+	if request.PreviewURL != "" && !localHTTPURL(request.PreviewURL) {
+		return errors.New("mpv preview URL must use the local stream server")
+	}
 	return nil
+}
+
+func windowArguments() []string {
+	return []string{
+		"--autofit=70%x70%",
+		"--geometry=50%:50%",
+		"--auto-window-resize=yes",
+		"--keepaspect-window=yes",
+	}
 }
 
 func arguments(request Request, edlPath string) []string {
@@ -126,16 +176,16 @@ func arguments(request Request, edlPath string) []string {
 		audioSelection = "1"
 	}
 
-	args := []string{
+	args := append(windowArguments(),
 		"--terminal=no",
 		"--ytdl=no",
 		"--vid=auto",
-		"--aid=" + audioSelection,
+		"--aid="+audioSelection,
 		"--sid=auto",
 		"--sub-visibility=no",
 		"--watch-later-options-remove=sub-pos",
-		"--force-media-title=" + request.Title,
-	}
+		"--force-media-title="+request.Title,
+	)
 	if !hasVideo {
 		args = append(args, "--force-window=yes")
 	}
@@ -147,6 +197,9 @@ func arguments(request Request, edlPath string) []string {
 	}
 	if request.CoverURL != "" {
 		args = append(args, "--cover-art-file="+request.CoverURL, "--audio-display=external-first")
+	}
+	if request.PreviewURL != "" {
+		args = append(args, "--script-opts-append=playview-preview="+request.PreviewURL)
 	}
 	return append(args, "--", edlPath)
 }

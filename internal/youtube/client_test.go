@@ -38,7 +38,7 @@ func TestReadResponseRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestRequestPlayerCancellation(t *testing.T) {
+func TestRequestPlayerPreservesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client := testClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -77,5 +77,24 @@ func TestReadResponseRejectsDeclaredOversizeBody(t *testing.T) {
 	var upstream *TransportError
 	if !errors.As(err, &upstream) || upstream.Kind != ResponseTooLarge {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestReadResponsePreservesCancellationBeforeHTTPFailure(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reader, writer := io.Pipe()
+			defer reader.Close()
+			defer writer.Close()
+			resp := response(status, "")
+			resp.Body = reader
+			cancel()
+			_, err := readResponse(ctx, ctx, resp, nil)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v; want context.Canceled", err)
+			}
+		})
 	}
 }

@@ -53,6 +53,12 @@ type console struct {
 }
 
 func Run(ctx context.Context, version string, args []string, in io.Reader, out, errOut io.Writer) error {
+	if len(args) > 0 && args[0] == "-preview" {
+		return fetchPreview(ctx, args[1:], out)
+	}
+	if len(args) > 0 && args[0] == "-playlist-page" {
+		return fetchPlaylistPage(ctx, args[1:])
+	}
 	deps := defaultDependencies()
 	if deps.closeSource != nil {
 		defer deps.closeSource()
@@ -66,12 +72,11 @@ func run(ctx context.Context, version string, args []string, in io.Reader, out, 
 		return err
 	}
 	if opts.help {
-		printUsage(out)
-		return nil
+		return printUsage(out)
 	}
 	if opts.version {
-		fmt.Fprintf(out, "play %s\n", version)
-		return nil
+		_, err := fmt.Fprintf(out, "play %s\n", version)
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -111,14 +116,20 @@ func run(ctx context.Context, version string, args []string, in io.Reader, out, 
 }
 
 func resolveVideo(ctx context.Context, videoID string, deps dependencies) (media.Item, error) {
+	if err := ctx.Err(); err != nil {
+		return media.Item{}, err
+	}
 	item, err := deps.resolveVideo(ctx, videoID)
 	if err == nil {
+		if err := ctx.Err(); err != nil {
+			return media.Item{}, err
+		}
 		return item, nil
 	}
 	if errors.Is(err, youtube.ErrLiveUnsupported) {
 		return media.Item{}, err
 	}
-	return media.Item{}, fmt.Errorf("resolve video: %w", err)
+	return media.Item{}, fmt.Errorf("load video: %w", err)
 }
 
 func defaultDependencies() dependencies {
@@ -180,7 +191,7 @@ func parseArgs(args []string) (options, error) {
 			opts.audioOnly = true
 		case "-h", "-help":
 			if opts.help {
-				return options{}, errors.New("help option may be specified only once")
+				return options{}, errors.New("-h/-help may be specified only once")
 			}
 			opts.help = true
 		case "-version":
@@ -201,10 +212,10 @@ func parseArgs(args []string) (options, error) {
 		}
 	}
 	if opts.help && (opts.version || opts.audioOnly || opts.wait || opts.input != "") {
-		return options{}, errors.New("-help cannot be combined with playback options")
+		return options{}, errors.New("-help must be used on its own")
 	}
 	if opts.version && (opts.help || opts.audioOnly || opts.wait || opts.input != "") {
-		return options{}, errors.New("-version cannot be combined with playback options")
+		return options{}, errors.New("-version must be used on its own")
 	}
 	return opts, nil
 }
@@ -269,16 +280,18 @@ func promptReference(ctx context.Context, terminal *console) (youtube.Reference,
 	}
 }
 
-func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  play [youtube-url|playlist-url|video-id]")
-	fmt.Fprintln(out, "  play -a [youtube-url|playlist-url|video-id]")
-	fmt.Fprintln(out, "  play -h")
-	fmt.Fprintln(out, "  play -version")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Options:")
-	fmt.Fprintln(out, "  -a        Play audio only")
-	fmt.Fprintln(out, "  -wait     Keep the terminal attached until playback ends")
-	fmt.Fprintln(out, "  -h, -help Show help")
-	fmt.Fprintln(out, "  -version  Show version")
+func printUsage(out io.Writer) error {
+	_, err := fmt.Fprint(out, `Usage:
+  play [youtube-url|playlist-url|video-id]
+  play -a [youtube-url|playlist-url|video-id]
+  play -h
+  play -version
+
+Options:
+  -a        Play audio only
+  -wait     Wait for playback to end before returning to the prompt
+  -h, -help Show help
+  -version  Show the version
+`)
+	return err
 }

@@ -22,6 +22,7 @@ type Resource struct {
 	MIME         string
 	Size         int64
 	Ranged       bool
+	Preview      *PreviewSource
 }
 
 type Server struct {
@@ -35,6 +36,7 @@ type Server struct {
 	closed     bool
 	closeOnce  sync.Once
 	closeErr   error
+	previews   *previewCache
 }
 
 func Start(resources []Resource, reporter Reporter) (*Server, error) {
@@ -63,6 +65,7 @@ func start(resources []Resource, reporter Reporter) (*Server, error) {
 	server := &Server{
 		client: newHTTPClient(), baseURL: "http://" + listener.Addr().String(), token: token,
 		reporter: reporter, handlers: make(map[string]http.Handler, len(resources)),
+		previews: newPreviewCache(previewCacheLimit),
 	}
 	for _, resource := range resources {
 		server.handlers[resource.Name] = server.handler(resource)
@@ -125,6 +128,9 @@ func (s *Server) Add(resources []Resource) error {
 }
 
 func (s *Server) handler(resource Resource) http.Handler {
+	if resource.Preview != nil {
+		return &previewHandler{client: s.client, source: resource, cache: s.previews}
+	}
 	if resource.Ranged {
 		return &sourceHandler{client: s.client, source: resource, chunkSize: maxChunkSize, reporter: s.reporter}
 	}
@@ -147,7 +153,7 @@ func (s *Server) Close() error {
 		s.mu.Lock()
 		s.closed = true
 		s.mu.Unlock()
-		s.closeErr = s.httpServer.Close()
+		s.closeErr = errors.Join(s.httpServer.Close(), s.previews.Close())
 		s.client.CloseIdleConnections()
 	})
 	return s.closeErr
@@ -170,6 +176,12 @@ func validateResources(resources []Resource) error {
 func validateResource(resource Resource) error {
 	if err := validateName(resource.Name); err != nil {
 		return err
+	}
+	if resource.Preview != nil {
+		if resource.URL != "" || len(resource.FallbackURLs) > 0 || resource.Ranged || resource.Size != 0 || resource.MIME != "" {
+			return errors.New("preview resource is invalid")
+		}
+		return validatePreview(resource.Preview)
 	}
 	if resource.Size < 0 {
 		return errors.New("resource size is invalid")
@@ -199,7 +211,7 @@ func validateResource(resource Resource) error {
 
 func validateResourceURL(value string) error {
 	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return errors.New("resource URL is not a valid HTTPS URL")
 	}
 	return nil

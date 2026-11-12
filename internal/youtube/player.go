@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"play/internal/media"
 )
@@ -46,11 +45,33 @@ func (e *PlayerError) Error() string {
 }
 
 func (c *Client) Video(ctx context.Context, videoID string) (media.Item, error) {
-	responses, err := c.fetchPlayerResponses(ctx, videoID)
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	metadata := make(chan []byte, 1)
+	go func() {
+		body, _ := c.requestChapterMetadata(workCtx, videoID)
+		metadata <- body
+	}()
+	responses, err := c.fetchPlayerResponses(workCtx, videoID)
 	if err != nil {
 		return media.Item{}, err
 	}
-	return parsePlayerResponses(responses, videoID)
+	item, err := parsePlayerResponses(responses, videoID)
+	if err != nil {
+		return media.Item{}, err
+	}
+	select {
+	case <-ctx.Done():
+		return media.Item{}, ctx.Err()
+	case body := <-metadata:
+		if err := ctx.Err(); err != nil {
+			return media.Item{}, err
+		}
+		if chapters := parseChapterMetadata(body, videoID, item.Duration); len(chapters) > 0 {
+			item.Chapters = chapters
+		}
+	}
+	return item, nil
 }
 
 func (c *Client) fetchPlayerResponses(ctx context.Context, videoID string) ([][]byte, error) {
@@ -89,7 +110,7 @@ func (c *Client) fetchPlayerResponses(ctx context.Context, videoID string) ([][]
 	}
 	for _, result := range results {
 		if upstream := transportError(result.err); upstream != nil {
-			return nil, upstream
+			return nil, result.err
 		}
 	}
 	return nil, &TransportError{Kind: NetworkFailure}
@@ -208,8 +229,14 @@ func extractVisitorData(value []byte) string {
 		return ""
 	}
 	visitorData := envelope.ResponseContext.VisitorData
-	if visitorData == "" || len(visitorData) > maxVisitorDataLength || strings.ContainsAny(visitorData, "\r\n") {
+	if visitorData == "" || len(visitorData) > maxVisitorDataLength {
 		return ""
+	}
+	for index := range len(visitorData) {
+		value := visitorData[index]
+		if value < ' ' && value != '\t' || value == '\x7f' {
+			return ""
+		}
 	}
 	return visitorData
 }

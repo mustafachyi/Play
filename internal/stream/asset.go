@@ -78,7 +78,7 @@ func fetchAsset(ctx context.Context, client *http.Client, sourceURL string) ([]b
 		if !retryable || attempt == maxChunkAttempts {
 			break
 		}
-		if err := waitRetry(ctx, attempt); err != nil {
+		if err := waitRetry(ctx, attempt, lastErr); err != nil {
 			return nil, "", err
 		}
 	}
@@ -104,9 +104,8 @@ func fetchAssetOnce(ctx context.Context, client *http.Client, sourceURL string) 
 		return nil, "", true, fmt.Errorf("upstream asset request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
-		return nil, "", retryableStatus(resp.StatusCode), fmt.Errorf("upstream asset returned HTTP %d", resp.StatusCode)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices || resp.StatusCode == http.StatusPartialContent {
+		return nil, "", retryableStatus(resp.StatusCode), newStatusError("upstream asset", resp)
 	}
 	encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding"))
 	if encoding != "" && !strings.EqualFold(encoding, "identity") {

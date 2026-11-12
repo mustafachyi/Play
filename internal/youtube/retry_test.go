@@ -36,7 +36,7 @@ func TestRequestsRecoverAfterTransientFailure(t *testing.T) {
 			body, err = client.requestPlayer(context.Background(), playerProfiles[0], testVideoID, "visitor")
 		}
 		if err != nil || calls != 2 || !strings.Contains(string(body), "true") {
-			t.Fatalf("browse=%v calls=%d body=%s error=%v", browse, calls, body, err)
+			t.Fatalf("browse = %v, calls = %d, body = %s, error = %v", browse, calls, body, err)
 		}
 	}
 }
@@ -49,7 +49,7 @@ func TestRetryStopsAtLimitAndPreservesError(t *testing.T) {
 		return nil, want
 	})
 	if err != want || calls != 3 {
-		t.Fatalf("calls=%d error=%v", calls, err)
+		t.Fatalf("calls = %d, error = %v", calls, err)
 	}
 }
 
@@ -68,7 +68,7 @@ func TestRetryRejectsPermanentFailures(t *testing.T) {
 			return nil, want
 		})
 		if err != want || calls != 1 {
-			t.Fatalf("calls=%d error=%v", calls, err)
+			t.Fatalf("calls = %d, error = %v", calls, err)
 		}
 	}
 }
@@ -83,6 +83,6 @@ func TestRetryCancellationDuringBackoff(t *testing.T) {
 		return nil, &TransportError{Kind: Timeout}
 	})
 	if !errors.Is(err, context.Canceled) || calls != 1 {
-		t.Fatalf("calls=%d error=%v", calls, err)
+		t.Fatalf("calls = %d, error = %v", calls, err)
 	}
 }

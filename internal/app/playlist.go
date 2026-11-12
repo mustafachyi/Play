@@ -17,7 +17,7 @@ func runPlaylist(ctx context.Context, reference youtube.Reference, audioOnly boo
 	diagnostics := &playlistDiagnostics{out: errOut}
 	source, err := deps.openPlaylist(reference.PlaylistID)
 	if err != nil {
-		return fmt.Errorf("resolve playlist: %w", err)
+		return fmt.Errorf("load playlist: %w", err)
 	}
 
 	var selectedItem media.Item
@@ -74,7 +74,7 @@ func runPlaylist(ctx context.Context, reference youtube.Reference, audioOnly boo
 		pageLoader = func(ctx context.Context) ([]media.PlaylistItem, bool, error) {
 			page, more, err := source.Next(ctx)
 			if err != nil {
-				err = fmt.Errorf("resolve playlist: %w", err)
+				err = fmt.Errorf("load playlist: %w", err)
 				if ctx.Err() == nil {
 					diagnostics.page(err)
 				}
@@ -158,9 +158,18 @@ func resolveReferencedPlaylist(ctx context.Context, reference youtube.Reference,
 func resolvePlaylistStart(ctx context.Context, reference youtube.Reference, source playlistSource) ([]media.PlaylistItem, int, bool, error) {
 	var items []media.PlaylistItem
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, false, err
+		}
 		page, more, err := source.Next(ctx)
 		if err != nil {
-			return nil, 0, false, fmt.Errorf("resolve playlist: %w", err)
+			return nil, 0, false, fmt.Errorf("load playlist: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, 0, false, err
+		}
+		if len(page) == 0 && more {
+			return nil, 0, false, errors.New("playlist page loader returned an empty page before completion")
 		}
 		items = append(items, page...)
 		if index, ready, err := playlistStartIndex(items, reference, !more); ready || err != nil {
@@ -171,18 +180,21 @@ func resolvePlaylistStart(ctx context.Context, reference youtube.Reference, sour
 
 func resolvePlaylistItem(item media.Item, plan playbackPlan, index int, local gateway) (localplaylist.ResolvedItem, error) {
 	namespacePlaybackPlan(&plan, index)
+	request, err := makePlaybackMetadata(item, 0, plan)
+	if err != nil {
+		return localplaylist.ResolvedItem{}, err
+	}
 	if err := local.add(plan.resources); err != nil {
 		return localplaylist.ResolvedItem{}, fmt.Errorf("add playlist streams: %w", err)
 	}
-	request, err := playbackRequest(item, 0, plan, local)
-	if err != nil {
+	if err := resolvePlaybackURLs(&request, plan, local); err != nil {
 		return localplaylist.ResolvedItem{}, err
 	}
 	body, err := mpv.EDL(request)
 	if err != nil {
 		return localplaylist.ResolvedItem{}, err
 	}
-	return localplaylist.ResolvedItem{EDL: body, CoverURL: request.CoverURL}, nil
+	return localplaylist.ResolvedItem{EDL: body, CoverURL: request.CoverURL, PreviewURL: request.PreviewURL}, nil
 }
 
 func playlistStartIndex(items []media.PlaylistItem, reference youtube.Reference, complete bool) (int, bool, error) {
@@ -193,7 +205,7 @@ func playlistStartIndex(items []media.PlaylistItem, reference youtube.Reference,
 				return 0, false, nil
 			}
 			if reference.VideoID == "" {
-				return 0, true, errors.New("playlist index is outside the playlist")
+				return 0, true, errors.New("the requested playlist position does not exist")
 			}
 		} else {
 			if reference.VideoID == "" || items[index].VideoID == reference.VideoID {
@@ -214,7 +226,7 @@ func playlistStartIndex(items []media.PlaylistItem, reference youtube.Reference,
 		if !complete {
 			return 0, false, nil
 		}
-		return 0, true, errors.New("referenced video is not present in the playlist")
+		return 0, true, errors.New("the requested video is not in this playlist")
 	}
 	if len(items) > 0 {
 		return 0, true, nil
@@ -244,6 +256,9 @@ func namespacePlaybackPlan(plan *playbackPlan, index int) {
 	}
 	if plan.cover != "" {
 		plan.cover = prefix + plan.cover
+	}
+	if plan.preview != "" {
+		plan.preview = prefix + plan.preview
 	}
 }
 

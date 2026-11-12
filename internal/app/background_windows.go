@@ -12,10 +12,13 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
 	"play/internal/mpv"
 	"play/internal/youtube"
 )
+
+const workerShutdownGrace = time.Second
 
 type workerRequest struct {
 	Reference youtube.Reference
@@ -68,8 +71,7 @@ func launchBackground(ctx context.Context, executable string, reference youtube.
 	}
 	_ = logFile.Close()
 	if _, err := input.Write(append(payload, '\n')); err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		stopBackground(command, input)
 		return fmt.Errorf("send playback worker request: %w", err)
 	}
 	result := make(chan error, 1)
@@ -82,24 +84,25 @@ func launchBackground(ctx context.Context, executable string, reference youtube.
 	}()
 	select {
 	case <-ctx.Done():
-		_ = input.Close()
-		_ = command.Wait()
+		stopBackground(command, input)
 		return ctx.Err()
 	case err := <-result:
 		if err != nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
+			stopBackground(command, input)
 			body, readErr := os.ReadFile(logFile.Name())
 			if readErr == nil && len(bytes.TrimSpace(body)) > 0 {
 				return errors.New(strings.TrimSpace(string(body)))
 			}
 			retainLog = true
-			return fmt.Errorf("playback worker failed before launching mpv; log: %s: %w", logFile.Name(), err)
+			return fmt.Errorf("could not start playback; log: %s: %w", logFile.Name(), err)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		stopBackground(command, input)
+		return err
+	}
 	if _, err := io.WriteString(input, "true\n"); err != nil {
-		_ = input.Close()
-		_ = command.Wait()
+		stopBackground(command, input)
 		return fmt.Errorf("acknowledge playback worker: %w", err)
 	}
 	retainLog = true
@@ -107,6 +110,23 @@ func launchBackground(ctx context.Context, executable string, reference youtube.
 		return fmt.Errorf("release playback worker: %w", err)
 	}
 	return nil
+}
+
+func stopBackground(command *exec.Cmd, input io.Closer) {
+	_ = input.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = command.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(workerShutdownGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		_ = command.Process.Kill()
+		<-done
+	}
 }
 
 func RunWorker(ctx context.Context) (runErr error) {
@@ -123,7 +143,10 @@ func RunWorker(ctx context.Context) (runErr error) {
 		info, err := os.Stderr.Stat()
 		_ = os.Stderr.Close()
 		if err == nil && info.Size() == 0 {
-			_ = os.Remove(request.LogPath)
+			logInfo, logErr := os.Stat(request.LogPath)
+			if logErr == nil && os.SameFile(info, logInfo) {
+				_ = os.Remove(request.LogPath)
+			}
 		}
 	}()
 	deps := defaultDependencies()

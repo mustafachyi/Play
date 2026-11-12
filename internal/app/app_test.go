@@ -15,6 +15,25 @@ import (
 
 const appTestID = "dQw4w9WgXcQ"
 
+func TestCanceledVideoResolutionDoesNotStartPlaybackResources(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := testDependencies(testItem(), nil, nil, nil)
+	deps.resolveVideo = func(context.Context, string) (media.Item, error) {
+		cancel()
+		return testItem(), nil
+	}
+	started := false
+	deps.startGateway = func([]stream.Resource, stream.Reporter) (gateway, error) {
+		started = true
+		return gateway{}, errors.New("playback resources started after cancellation")
+	}
+	err := run(ctx, "test", []string{"-wait", appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps)
+	if !errors.Is(err, context.Canceled) || started {
+		t.Fatalf("started = %v, error = %v; want cancellation before playback setup", started, err)
+	}
+}
+
 type playlistSourceFunc func(context.Context) ([]media.PlaylistItem, bool, error)
 
 func (f playlistSourceFunc) Next(ctx context.Context) ([]media.PlaylistItem, bool, error) {
@@ -134,10 +153,10 @@ func TestDirectModeExposesTrackSetWithDefaultsAndTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 || request.StartSeconds != 462 || request.Duration != 801 || request.Title != "Test video" || request.Executable == "" {
-		t.Fatalf("out=%q request=%#v", out.String(), request)
+		t.Fatalf("output = %q, request = %#v", out.String(), request)
 	}
 	if len(resources) != 7 || len(request.Tracks) != 7 {
-		t.Fatalf("resources=%d tracks=%d", len(resources), len(request.Tracks))
+		t.Fatalf("resources = %d, tracks = %d", len(resources), len(request.Tracks))
 	}
 	if request.Tracks[0].Kind != mpv.Video || request.Tracks[0].Title != "2160p" || request.Tracks[0].Default {
 		t.Fatalf("first video = %#v", request.Tracks[0])
@@ -152,7 +171,7 @@ func TestDirectModeExposesTrackSetWithDefaultsAndTimestamp(t *testing.T) {
 		t.Fatalf("subtitle defaults = %#v %#v", request.Tracks[5], request.Tracks[6])
 	}
 	if resources[0].Name != "v01.webm" || resources[3].Name != "a01.webm" || resources[5].Name != "s01.vtt" || request.CoverURL != "" || !closed {
-		t.Fatalf("resources=%#v cover=%q closed=%v", resources, request.CoverURL, closed)
+		t.Fatalf("resources = %#v, cover = %q, closed = %v", resources, request.CoverURL, closed)
 	}
 }
 
@@ -207,7 +226,7 @@ func TestVideoTrackOrderIsIndependentOfDefaultSelection(t *testing.T) {
 			}
 			for i, title := range test.expectedTitles {
 				if tracks[i].Title != title || tracks[i].Default != (title == test.defaultTitle) {
-					t.Fatalf("track %d = %#v; want title=%q default=%v", i, tracks[i], title, title == test.defaultTitle)
+					t.Fatalf("track %d = %#v; want title = %q, default = %v", i, tracks[i], title, title == test.defaultTitle)
 				}
 			}
 		})
@@ -243,12 +262,16 @@ func TestAudioOnlyUsesPreferredAudioThumbnailAndNoVideo(t *testing.T) {
 			t.Fatalf("audio-only request contains video: %#v", track)
 		}
 	}
-	if request.CoverURL != "http://127.0.0.1:1234/token/cover.jpg" || len(resources) != 5 {
-		t.Fatalf("cover=%q resources=%#v", request.CoverURL, resources)
+	if request.CoverURL != "http://127.0.0.1:1234/token/cover.jpg" || request.PreviewURL != "http://127.0.0.1:1234/token/preview.json" || len(resources) != 6 {
+		t.Fatalf("cover = %q, resources = %#v", request.CoverURL, resources)
 	}
-	cover := resources[len(resources)-1]
+	cover := resources[len(resources)-2]
 	if cover.URL != "https://image/cover.jpg" || len(cover.FallbackURLs) != 1 || cover.FallbackURLs[0] != "https://image/cover-fallback.jpg" {
 		t.Fatalf("cover resource = %#v", cover)
+	}
+	preview := resources[len(resources)-1].Preview
+	if preview == nil || preview.Storyboard != nil || len(preview.ArtworkURLs) != 2 {
+		t.Fatalf("preview resource = %#v", preview)
 	}
 }
 
@@ -276,7 +299,7 @@ func TestNormalModeNeverSelectsAbove1080(t *testing.T) {
 	}
 	err := run(context.Background(), "0.3.0", []string{appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps)
 	if err == nil || !strings.Contains(err.Error(), "at or below 1080p") || started {
-		t.Fatalf("err=%v started=%v", err, started)
+		t.Fatalf("error = %v, started = %v", err, started)
 	}
 }
 
@@ -286,11 +309,11 @@ func TestGatewayClosesWhenPlayerFails(t *testing.T) {
 	deps.play = func(context.Context, mpv.Request) error { return errors.New("player failed") }
 	err := run(context.Background(), "0.3.0", []string{appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps)
 	if err == nil || !strings.Contains(err.Error(), "player failed") || !closed {
-		t.Fatalf("err=%v closed=%v", err, closed)
+		t.Fatalf("error = %v, closed = %v", err, closed)
 	}
 }
 
-func TestDirectLiveStreamReturnsClearErrorBeforeGateway(t *testing.T) {
+func TestDirectLiveStreamStopsBeforeGateway(t *testing.T) {
 	deps := testDependencies(testItem(), nil, nil, nil)
 	started := false
 	deps.resolveVideo = func(context.Context, string) (media.Item, error) { return media.Item{}, youtube.ErrLiveUnsupported }
@@ -300,7 +323,7 @@ func TestDirectLiveStreamReturnsClearErrorBeforeGateway(t *testing.T) {
 	}
 	err := run(context.Background(), "0.1.0", []string{appTestID}, strings.NewReader(""), io.Discard, io.Discard, deps)
 	if !errors.Is(err, youtube.ErrLiveUnsupported) || started {
-		t.Fatalf("err=%v started=%v", err, started)
+		t.Fatalf("error = %v, started = %v", err, started)
 	}
 }
 
@@ -316,17 +339,37 @@ func TestSingleDashOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.String() != "play 1.2.3\n" || called {
-		t.Fatalf("output=%q called=%v", out.String(), called)
+		t.Fatalf("output = %q, called = %v", out.String(), called)
 	}
 	out.Reset()
 	if err := run(context.Background(), "1.2.3", []string{"-h"}, strings.NewReader(""), &out, io.Discard, deps); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "playlist-url") || called {
-		t.Fatalf("output=%q called=%v", out.String(), called)
+		t.Fatalf("output = %q, called = %v", out.String(), called)
 	}
 	if err := run(context.Background(), "1.2.3", []string{"--version"}, strings.NewReader(""), io.Discard, io.Discard, deps); err == nil {
-		t.Fatal("expected double-dash option to be rejected")
+		t.Fatal("double-dash option was accepted")
+	}
+}
+
+type outputErrorWriter struct {
+	err error
+}
+
+func (writer outputErrorWriter) Write([]byte) (int, error) {
+	return 0, writer.err
+}
+
+func TestHelpAndVersionReturnOutputErrors(t *testing.T) {
+	for _, option := range []string{"-h", "-help", "-version"} {
+		t.Run(option, func(t *testing.T) {
+			outputErr := errors.New("output unavailable")
+			err := run(context.Background(), "1.2.3", []string{option}, nil, outputErrorWriter{err: outputErr}, io.Discard, dependencies{})
+			if !errors.Is(err, outputErr) {
+				t.Fatalf("error = %v; want %v", err, outputErr)
+			}
+		})
 	}
 }
 
@@ -337,7 +380,7 @@ func TestParseArgsAcceptsAudioFlagBeforeOrAfterInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !opts.audioOnly || opts.input != appTestID {
-			t.Fatalf("args=%#v opts=%#v", args, opts)
+			t.Fatalf("args = %#v, options = %#v", args, opts)
 		}
 	}
 }
@@ -346,6 +389,6 @@ func TestParseArgsAcceptsVideoIDStartingWithHyphen(t *testing.T) {
 	const id = "-abcdefghij"
 	opts, err := parseArgs([]string{id})
 	if err != nil || opts.input != id {
-		t.Fatalf("opts=%#v err=%v", opts, err)
+		t.Fatalf("options = %#v, error = %v", opts, err)
 	}
 }

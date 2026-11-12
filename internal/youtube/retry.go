@@ -2,7 +2,9 @@ package youtube
 
 import (
 	"context"
-	"time"
+	"errors"
+
+	"play/internal/httpretry"
 )
 
 func retryRequest(ctx context.Context, request func() ([]byte, error)) ([]byte, error) {
@@ -14,16 +16,12 @@ func retryRequest(ctx context.Context, request func() ([]byte, error)) ([]byte, 
 		if err == nil || attempt == 2 || !retryableError(err) {
 			return body, err
 		}
-		delay := 150 * time.Millisecond
-		if attempt > 0 {
-			delay = 400 * time.Millisecond
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
+		upstream := transportError(err)
+		if waitErr := httpretry.Wait(ctx, attempt+1, upstream.RetryAfter, upstream.ReceivedAt); waitErr != nil {
+			if errors.Is(waitErr, httpretry.ErrDelayTooLong) {
+				return nil, errors.Join(err, waitErr)
+			}
+			return nil, waitErr
 		}
 	}
 }

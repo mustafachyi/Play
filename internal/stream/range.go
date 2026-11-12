@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	maxChunkSize        int64 = 9_750_000
-	maxChunkAttempts          = 3
-	rangeRequestTimeout       = 2 * time.Minute
+	maxChunkSize     int64 = 8 << 20
+	maxChunkAttempts       = 3
+	rangeReadTimeout       = 10 * time.Second
 )
 
 type byteRange struct {
@@ -25,12 +25,17 @@ type byteRange struct {
 }
 
 type sourceHandler struct {
-	client    *http.Client
-	source    Resource
-	chunkSize int64
-	reporter  Reporter
-	sizeMu    sync.Mutex
-	size      int64
+	client       *http.Client
+	source       Resource
+	chunkSize    int64
+	readTimeout  time.Duration
+	reporter     Reporter
+	sizeGateOnce sync.Once
+	sizeGate     chan struct{}
+	size         int64
+	cooldownMu   sync.Mutex
+	cooldownErr  error
+	cooldownEnds time.Time
 }
 
 type trackingWriter struct {
@@ -87,21 +92,37 @@ func (h *sourceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.copySpan(r.Context(), w, requested.start, requested.end, size); err != nil {
 		h.report(r.Context(), err)
+		var exhausted *rangeRetryExhaustedError
+		if r.Context().Err() == nil && errors.As(err, &exhausted) {
+			_ = http.NewResponseController(w).Flush()
+		}
 		panic(http.ErrAbortHandler)
 	}
 }
 
 func (h *sourceHandler) contentSize(ctx context.Context) (int64, error) {
+	if err := h.checkCooldown(ctx); err != nil {
+		return 0, err
+	}
 	if h.source.Size > 0 {
 		return h.source.Size, nil
 	}
-	h.sizeMu.Lock()
-	defer h.sizeMu.Unlock()
+	h.sizeGateOnce.Do(func() { h.sizeGate = make(chan struct{}, 1) })
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case h.sizeGate <- struct{}{}:
+	}
+	defer func() { <-h.sizeGate }()
+	if err := h.checkCooldown(ctx); err != nil {
+		return 0, err
+	}
 	if h.size > 0 {
 		return h.size, nil
 	}
 	size, err := probeSize(ctx, h.client, h.source.URL)
 	if err != nil {
+		h.retainCooldown(err)
 		return 0, err
 	}
 	h.size = size
@@ -120,13 +141,22 @@ func (h *sourceHandler) copySpan(ctx context.Context, dst io.Writer, start, end,
 			chunkEnd = end
 		}
 		attempts := 0
+		progressStart := position
+		progressThreshold := (chunkEnd - position + 4) / 4
 		var lastErr error
 		for position <= chunkEnd {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if attempts >= maxChunkAttempts {
-				return fmt.Errorf("upstream range request failed after %d attempts: %w", maxChunkAttempts, lastErr)
+				var upstream *upstreamStatusError
+				if errors.As(lastErr, &upstream) && strings.TrimSpace(upstream.retryAfter) != "" {
+					if err := waitRetry(ctx, attempts, lastErr); err != nil {
+						h.retainCooldown(err)
+						return err
+					}
+				}
+				return &rangeRetryExhaustedError{attempts: maxChunkAttempts, progressBytes: progressThreshold, cause: lastErr}
 			}
 			attempts++
 			partStart := position
@@ -139,8 +169,13 @@ func (h *sourceHandler) copySpan(ctx context.Context, dst io.Writer, start, end,
 			if !retryable {
 				return lastErr
 			}
+			if position-progressStart >= progressThreshold {
+				attempts = 0
+				progressStart = position
+			}
 			if attempts < maxChunkAttempts {
-				if err := waitRetry(ctx, attempts); err != nil {
+				if err := waitRetry(ctx, max(1, attempts), lastErr); err != nil {
+					h.retainCooldown(err)
 					return err
 				}
 			}
@@ -150,7 +185,10 @@ func (h *sourceHandler) copySpan(ctx context.Context, dst io.Writer, start, end,
 }
 
 func (h *sourceHandler) fetchPart(ctx context.Context, dst io.Writer, start, end, total int64) (int64, bool, error) {
-	requestCtx, cancel := context.WithTimeout(ctx, rangeRequestTimeout)
+	if err := h.checkCooldown(ctx); err != nil {
+		return 0, false, err
+	}
+	requestCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, h.source.URL, nil)
 	if err != nil {
@@ -163,19 +201,23 @@ func (h *sourceHandler) fetchPart(ctx context.Context, dst io.Writer, start, end
 		if ctx.Err() != nil {
 			return 0, false, ctx.Err()
 		}
-		if requestCtx.Err() == context.DeadlineExceeded {
-			return 0, true, errors.New("upstream range request timed out")
-		}
 		return 0, true, fmt.Errorf("upstream range request failed: %w", err)
 	}
 	expected, err := validateRangeResponse(resp, start, end, total)
 	if err != nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
+		if resp.StatusCode != http.StatusPartialContent {
+			err = newStatusError("upstream range request", resp)
+		}
 		_ = resp.Body.Close()
 		return 0, retryableStatus(resp.StatusCode), err
 	}
+	timeout := h.readTimeout
+	if timeout <= 0 {
+		timeout = rangeReadTimeout
+	}
+	reader := &progressReader{reader: resp.Body, cancel: cancel, timeout: timeout}
 	writer := &trackingWriter{writer: dst}
-	written, copyErr := io.CopyN(writer, resp.Body, expected)
+	written, copyErr := io.CopyN(writer, reader, expected)
 	closeErr := resp.Body.Close()
 	if writer.err != nil {
 		return written, false, writer.err
@@ -207,7 +249,7 @@ func probeSize(ctx context.Context, client *http.Client, sourceURL string) (int6
 		if !retryable || attempt == maxChunkAttempts {
 			break
 		}
-		if err := waitRetry(ctx, attempt); err != nil {
+		if err := waitRetry(ctx, attempt, lastErr); err != nil {
 			return 0, err
 		}
 	}
@@ -235,8 +277,7 @@ func probeSizeOnce(ctx context.Context, client *http.Client, sourceURL string) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
-		return 0, retryableStatus(resp.StatusCode), fmt.Errorf("upstream size probe returned HTTP %d", resp.StatusCode)
+		return 0, retryableStatus(resp.StatusCode), newStatusError("upstream size probe", resp)
 	}
 	encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding"))
 	if encoding != "" && !strings.EqualFold(encoding, "identity") {
@@ -246,23 +287,14 @@ func probeSizeOnce(ctx context.Context, client *http.Client, sourceURL string) (
 	if err != nil || start != 0 || end != 0 || total <= 0 {
 		return 0, false, errors.New("upstream returned an invalid size probe response")
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2))
+	reader := &progressReader{reader: resp.Body, cancel: cancel, timeout: rangeReadTimeout}
+	if _, err := io.CopyN(io.Discard, reader, 1); err != nil {
+		if ctx.Err() != nil {
+			return 0, false, ctx.Err()
+		}
+		return 0, true, fmt.Errorf("read upstream size probe: %w", err)
+	}
 	return total, false, nil
-}
-
-func waitRetry(ctx context.Context, attempt int) error {
-	delay := 150 * time.Millisecond
-	if attempt > 1 {
-		delay = 400 * time.Millisecond
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func validateRangeResponse(resp *http.Response, start, end, total int64) (int64, error) {
@@ -366,8 +398,4 @@ func parseNonNegativeInt(value string) (int64, error) {
 		}
 	}
 	return strconv.ParseInt(value, 10, 64)
-}
-
-func retryableStatus(status int) bool {
-	return status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status == http.StatusInternalServerError || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }

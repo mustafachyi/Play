@@ -34,6 +34,21 @@ type Subtitle struct {
 	Auto         bool
 }
 
+type Storyboard struct {
+	URL      string
+	Width    int
+	Height   int
+	Columns  int
+	Rows     int
+	Count    int
+	Interval float64
+}
+
+type Chapter struct {
+	Time  float64 `json:"time"`
+	Title string  `json:"title"`
+}
+
 type Item struct {
 	Title      string
 	Duration   int64
@@ -41,6 +56,8 @@ type Item struct {
 	Videos     []Video
 	Audios     []Audio
 	Subtitles  []Subtitle
+	Storyboard *Storyboard
+	Chapters   []Chapter
 }
 
 type PlaylistItem struct {

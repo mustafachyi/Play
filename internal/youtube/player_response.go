@@ -14,6 +14,7 @@ type playerResponse struct {
 	StreamingData     *streamingData     `json:"streamingData"`
 	Captions          *captions          `json:"captions"`
 	Microformat       *playerMicroformat `json:"microformat"`
+	Storyboards       json.RawMessage    `json:"storyboards"`
 }
 
 type playabilityStatus struct {
@@ -25,6 +26,7 @@ type playabilityStatus struct {
 type videoDetails struct {
 	VideoID       string         `json:"videoId"`
 	Title         string         `json:"title"`
+	Description   string         `json:"shortDescription"`
 	LengthSeconds flexibleInt    `json:"lengthSeconds"`
 	Thumbnail     *thumbnailList `json:"thumbnail"`
 	IsLive        *bool          `json:"isLive"`
@@ -256,5 +258,7 @@ func parsePlayerResponses(rawResponses [][]byte, requestedVideoID string) (media
 		Videos:     videos,
 		Audios:     audios,
 		Subtitles:  chooseSubtitles(matched),
+		Storyboard: chooseStoryboard(matched, duration),
+		Chapters:   chooseDescriptionChapters(matched, duration),
 	}, nil
 }

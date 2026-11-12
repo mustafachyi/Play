@@ -64,7 +64,7 @@ func TestServerPublishesTitlesAndResolvesEntriesLazily(t *testing.T) {
 			t.Fatal(err)
 		}
 		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "bbbbbbbbbbb") {
-			t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+			t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
 		}
 	}
 	if calls.Load() != 1 {
@@ -117,7 +117,7 @@ func TestPrepareResolvesSelectedEntryOnce(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || calls.Load() != 1 {
-		t.Fatalf("status=%d calls=%d", resp.StatusCode, calls.Load())
+		t.Fatalf("status = %d, calls = %d", resp.StatusCode, calls.Load())
 	}
 }
 
@@ -141,7 +141,7 @@ func TestHeadDoesNotResolveEntry(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || calls.Load() != 0 {
-		t.Fatalf("status=%d calls=%d", resp.StatusCode, calls.Load())
+		t.Fatalf("status = %d, calls = %d", resp.StatusCode, calls.Load())
 	}
 }
 
@@ -165,7 +165,7 @@ func TestCoverRouteUsesResolvedLocalCoverAndSharedCache(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != cover {
-		t.Fatalf("status=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
+		t.Fatalf("status = %d, location = %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
 
 	entryURL := strings.Replace(server.URL(), "playlist.m3u", "item/0001.edl", 1)
@@ -175,7 +175,7 @@ func TestCoverRouteUsesResolvedLocalCoverAndSharedCache(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || calls.Load() != 1 {
-		t.Fatalf("status=%d calls=%d", resp.StatusCode, calls.Load())
+		t.Fatalf("status = %d, calls = %d", resp.StatusCode, calls.Load())
 	}
 }
 
@@ -221,7 +221,7 @@ func TestServerReportsRepeatedResolutionFailureOncePerMessage(t *testing.T) {
 		return ResolvedItem{}, errors.New("unsupported item")
 	}, nil, func(index int, err error) {
 		if index != 0 || err.Error() != "unsupported item" {
-			t.Fatalf("report index=%d err=%v", index, err)
+			t.Fatalf("report index = %d, error = %v", index, err)
 		}
 		reports.Add(1)
 	})
@@ -282,6 +282,106 @@ func TestConcurrentEntryAndCoverRequestsResolveOnce(t *testing.T) {
 	}
 }
 
+func TestCanceledEntryWaiterPreservesSharedResolution(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var calls atomic.Int32
+	server := &Server{resolver: func(context.Context, int, string) (ResolvedItem, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return resolved("item"), nil
+	}}
+	item := &entry{item: testItems()[0]}
+	results := make(chan error, 3)
+	resolve := func() {
+		value, err := server.resolveEntry(context.Background(), 0, item, false)
+		if err == nil && value.EDL != "item" {
+			err = errors.New("unexpected resolved item")
+		}
+		results <- err
+	}
+	go resolve()
+	<-started
+	go resolve()
+	go resolve()
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled := make(chan error, 1)
+	go func() { _, err := server.resolveEntry(ctx, 0, item, false); canceled <- err }()
+	cancel()
+	select {
+	case err := <-canceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled entry waiter remained blocked")
+	}
+	unblock()
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolve()
+	if err := <-results; err != nil || calls.Load() != 1 {
+		t.Fatalf("cached resolution error = %v; calls = %d", err, calls.Load())
+	}
+}
+
+func TestCanceledPageWaiterPreservesSharedPageLoad(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var calls atomic.Int32
+	server := &Server{
+		pageMore: true, nextPage: 2, pageBodies: make(map[int]string),
+		pageLoader: func(context.Context) ([]media.PlaylistItem, bool, error) {
+			calls.Add(1)
+			close(started)
+			<-release
+			return nil, false, nil
+		},
+	}
+	results := make(chan error, 3)
+	load := func() {
+		body, err := server.loadPage(context.Background(), 2)
+		if err == nil && body != "#EXTM3U\n" {
+			err = errors.New("unexpected playlist page")
+		}
+		results <- err
+	}
+	go load()
+	<-started
+	go load()
+	go load()
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled := make(chan error, 1)
+	go func() { _, err := server.loadPage(ctx, 2); canceled <- err }()
+	cancel()
+	select {
+	case err := <-canceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled page waiter remained blocked")
+	}
+	unblock()
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	load()
+	if err := <-results; err != nil || calls.Load() != 1 {
+		t.Fatalf("cached page error = %v; calls = %d", err, calls.Load())
+	}
+}
+
 func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 	pages := [][]media.PlaylistItem{
 		{{VideoID: "ccccccccccc", Title: "Third title"}},
@@ -314,7 +414,7 @@ func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "#EXTINF:-1,Third title") || !strings.Contains(string(body), "/item/0003.edl") || loads.Load() != 1 {
-		t.Fatalf("page2 status=%d body=%q loads=%d", resp.StatusCode, body, loads.Load())
+		t.Fatalf("page2 status = %d, body = %q, loads = %d", resp.StatusCode, body, loads.Load())
 	}
 
 	resp, err = http.Get(page2)
@@ -327,7 +427,7 @@ func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(cached) != string(body) || loads.Load() != 1 {
-		t.Fatalf("cached=%q loads=%d", cached, loads.Load())
+		t.Fatalf("cached = %q, loads = %d", cached, loads.Load())
 	}
 
 	resp, err = http.Get(server.PageURL() + "0003.m3u")
@@ -340,7 +440,7 @@ func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "#EXTINF:-1,Fourth title") || !strings.Contains(string(body), "/item/0004.edl") || loads.Load() != 2 {
-		t.Fatalf("page3 status=%d body=%q loads=%d", resp.StatusCode, body, loads.Load())
+		t.Fatalf("page3 status = %d, body = %q, loads = %d", resp.StatusCode, body, loads.Load())
 	}
 
 	resp, err = http.Get(server.PageURL() + "0004.m3u")
@@ -353,7 +453,7 @@ func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "#EXTM3U" || loads.Load() != 2 {
-		t.Fatalf("terminal status=%d body=%q loads=%d", resp.StatusCode, body, loads.Load())
+		t.Fatalf("terminal status = %d, body = %q, loads = %d", resp.StatusCode, body, loads.Load())
 	}
 
 	resp, err = http.Get(strings.Replace(server.URL(), "playlist.m3u", "item/0004.edl", 1))
@@ -366,7 +466,7 @@ func TestProgressivePagesAppendRoutesInOrderAndCacheResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "ddddddddddd") {
-		t.Fatalf("item status=%d body=%q", resp.StatusCode, body)
+		t.Fatalf("item status = %d, body = %q", resp.StatusCode, body)
 	}
 }
 
@@ -393,7 +493,7 @@ func TestProgressivePageRequestsAreSequentialAndHeadDoesNotAdvance(t *testing.T)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || loads.Load() != 0 {
-		t.Fatalf("HEAD status=%d loads=%d", resp.StatusCode, loads.Load())
+		t.Fatalf("HEAD status = %d, loads = %d", resp.StatusCode, loads.Load())
 	}
 
 	resp, err = http.Get(server.PageURL() + "0003.m3u")
@@ -402,7 +502,7 @@ func TestProgressivePageRequestsAreSequentialAndHeadDoesNotAdvance(t *testing.T)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway || loads.Load() != 0 {
-		t.Fatalf("out-of-sequence status=%d loads=%d", resp.StatusCode, loads.Load())
+		t.Fatalf("out-of-sequence status = %d, loads = %d", resp.StatusCode, loads.Load())
 	}
 }
 
@@ -491,12 +591,12 @@ func TestCloseCancelsActiveResolution(t *testing.T) {
 
 func TestStartRejectsInvalidInput(t *testing.T) {
 	if _, err := Start(nil, func(context.Context, int, string) (ResolvedItem, error) { return ResolvedItem{}, nil }, nil, nil); err == nil {
-		t.Fatal("expected empty playlist to be rejected")
+		t.Fatal("empty playlist was accepted")
 	}
 	if _, err := Start(testItems()[:1], nil, nil, nil); err == nil {
-		t.Fatal("expected nil resolver to be rejected")
+		t.Fatal("nil resolver was accepted")
 	}
 	if _, err := Start([]media.PlaylistItem{{Title: "missing ID"}}, func(context.Context, int, string) (ResolvedItem, error) { return ResolvedItem{}, nil }, nil, nil); err == nil {
-		t.Fatal("expected empty video ID to be rejected")
+		t.Fatal("empty video ID was accepted")
 	}
 }

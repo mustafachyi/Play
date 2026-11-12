@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,12 +16,14 @@ import (
 	"sync"
 	"time"
 
+	"play/internal/httpretry"
 	"play/internal/media"
 )
 
 type ResolvedItem struct {
-	EDL      string
-	CoverURL string
+	EDL        string
+	CoverURL   string
+	PreviewURL string
 }
 
 type Resolver func(context.Context, int, string) (ResolvedItem, error)
@@ -32,6 +35,7 @@ type routeKind uint8
 const (
 	entryRoute routeKind = iota
 	coverRoute
+	previewRoute
 )
 
 type route struct {
@@ -40,29 +44,32 @@ type route struct {
 }
 
 type Server struct {
-	httpServer *http.Server
-	baseURL    string
-	token      string
-	playlist   string
-	resolver   Resolver
-	pageLoader PageLoader
-	reporter   Reporter
-	mu         sync.RWMutex
-	entries    []*entry
-	routes     map[string]route
-	pageMu     sync.Mutex
-	pageMore   bool
-	nextPage   int
-	pageBodies map[int]string
-	closeOnce  sync.Once
-	closeErr   error
+	httpServer    *http.Server
+	baseURL       string
+	token         string
+	playlist      string
+	resolver      Resolver
+	pageLoader    PageLoader
+	reporter      Reporter
+	mu            sync.RWMutex
+	entries       []*entry
+	routes        map[string]route
+	pageGateOnce  sync.Once
+	pageGate      chan struct{}
+	pageMore      bool
+	nextPage      int
+	pageBodies    map[int]string
+	closeOnce     sync.Once
+	closeErr      error
+	previewClient *http.Client
 }
 
 type entry struct {
-	mu      sync.Mutex
-	item    media.PlaylistItem
-	value   ResolvedItem
-	lastErr string
+	resolveGateOnce sync.Once
+	resolveGate     chan struct{}
+	item            media.PlaylistItem
+	value           ResolvedItem
+	lastErr         string
 }
 
 func Start(items []media.PlaylistItem, resolver Resolver, pageLoader PageLoader, reporter Reporter) (*Server, error) {
@@ -86,15 +93,16 @@ func Start(items []media.PlaylistItem, resolver Resolver, pageLoader PageLoader,
 	}
 
 	server := &Server{
-		baseURL:    "http://" + listener.Addr().String(),
-		token:      token,
-		resolver:   resolver,
-		pageLoader: pageLoader,
-		reporter:   reporter,
-		routes:     make(map[string]route, len(items)*2),
-		pageMore:   pageLoader != nil,
-		nextPage:   2,
-		pageBodies: make(map[int]string),
+		baseURL:       "http://" + listener.Addr().String(),
+		token:         token,
+		resolver:      resolver,
+		pageLoader:    pageLoader,
+		reporter:      reporter,
+		routes:        make(map[string]route, len(items)*3),
+		pageMore:      pageLoader != nil,
+		nextPage:      2,
+		pageBodies:    make(map[int]string),
+		previewClient: &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone(), Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 	server.playlist = server.appendItems(items)
 	server.httpServer = &http.Server{
@@ -117,9 +125,11 @@ func (s *Server) appendItems(items []media.PlaylistItem) string {
 		index := len(s.entries)
 		entryPath := fmt.Sprintf("/%s/item/%04d.edl", s.token, index+1)
 		coverPath := fmt.Sprintf("/%s/cover/%04d", s.token, index+1)
+		previewPath := fmt.Sprintf("/%s/p%04d-preview.json", s.token, index+1)
 		s.entries = append(s.entries, &entry{item: item})
 		s.routes[entryPath] = route{index: index, kind: entryRoute}
 		s.routes[coverPath] = route{index: index, kind: coverRoute}
+		s.routes[previewPath] = route{index: index, kind: previewRoute}
 		playlist.WriteString("#EXTINF:-1,")
 		playlist.WriteString(playlistTitle(item))
 		playlist.WriteByte('\n')
@@ -167,7 +177,7 @@ func (s *Server) PageURL() string {
 func (s *Server) Prepare(ctx context.Context, index int) error {
 	entry := s.entry(index)
 	if entry == nil {
-		return errors.New("playlist index is outside the playlist")
+		return errors.New("the requested playlist position does not exist")
 	}
 	_, err := s.resolveEntry(ctx, index, entry, false)
 	return err
@@ -176,6 +186,7 @@ func (s *Server) Prepare(ctx context.Context, index int) error {
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.httpServer.Close()
+		s.previewClient.CloseIdleConnections()
 	})
 	return s.closeErr
 }
@@ -211,6 +222,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveCover(w, r, matched.index, entry)
 		return
 	}
+	if matched.kind == previewRoute {
+		s.servePreview(w, r, matched.index, entry)
+		return
+	}
 	s.serveEntry(w, r, matched.index, entry)
 }
 
@@ -235,7 +250,11 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request, page int) {
 	}
 	body, err := s.loadPage(r.Context(), page)
 	if err != nil {
-		http.Error(w, "playlist page unavailable", http.StatusBadGateway)
+		status := http.StatusBadGateway
+		if errors.Is(err, httpretry.ErrDelayTooLong) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, "playlist page unavailable", status)
 		return
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
@@ -244,8 +263,16 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request, page int) {
 }
 
 func (s *Server) loadPage(ctx context.Context, page int) (string, error) {
-	s.pageMu.Lock()
-	defer s.pageMu.Unlock()
+	s.pageGateOnce.Do(func() { s.pageGate = make(chan struct{}, 1) })
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case s.pageGate <- struct{}{}:
+	}
+	defer func() { <-s.pageGate }()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	if body, ok := s.pageBodies[page]; ok {
 		return body, nil
@@ -277,6 +304,9 @@ func (s *Server) loadPage(ctx context.Context, page int) (string, error) {
 	s.pageMore = more
 	s.pageBodies[page] = body
 	s.nextPage++
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return body, nil
 }
 
@@ -326,6 +356,58 @@ func (s *Server) serveCover(w http.ResponseWriter, r *http.Request, index int, e
 	http.Redirect(w, r, resolved.CoverURL, http.StatusTemporaryRedirect)
 }
 
+func (s *Server) servePreview(w http.ResponseWriter, r *http.Request, index int, entry *entry) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method == http.MethodHead {
+		return
+	}
+	resolved, err := s.resolveEntry(r.Context(), index, entry, true)
+	if err != nil {
+		http.Error(w, "playlist item unavailable", http.StatusBadGateway)
+		return
+	}
+	if resolved.PreviewURL == "" {
+		http.NotFound(w, r)
+		return
+	}
+	target, err := url.Parse(resolved.PreviewURL)
+	if err != nil {
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		return
+	}
+	target.RawQuery = r.URL.RawQuery
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	if err != nil {
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		return
+	}
+	response, err := s.previewClient.Do(request)
+	if err != nil {
+		if r.Context().Err() == nil {
+			http.Error(w, "preview unavailable", http.StatusBadGateway)
+		}
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		status := response.StatusCode
+		if status < 400 || status >= 600 {
+			status = http.StatusBadGateway
+		}
+		http.Error(w, "preview unavailable", status)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8193))
+	if err != nil || len(body) > 8192 || !json.Valid(body) {
+		http.Error(w, "preview metadata is invalid", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+}
+
 func (s *Server) entry(index int) *entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -336,8 +418,16 @@ func (s *Server) entry(index int) *entry {
 }
 
 func (s *Server) resolveEntry(ctx context.Context, index int, entry *entry, report bool) (ResolvedItem, error) {
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.resolveGateOnce.Do(func() { entry.resolveGate = make(chan struct{}, 1) })
+	select {
+	case <-ctx.Done():
+		return ResolvedItem{}, ctx.Err()
+	case entry.resolveGate <- struct{}{}:
+	}
+	defer func() { <-entry.resolveGate }()
+	if err := ctx.Err(); err != nil {
+		return ResolvedItem{}, err
+	}
 	if entry.value.EDL != "" {
 		return entry.value, nil
 	}
@@ -348,6 +438,9 @@ func (s *Server) resolveEntry(ctx context.Context, index int, entry *entry, repo
 	if err == nil && resolved.CoverURL != "" && !localHTTPURL(resolved.CoverURL) {
 		err = errors.New("playlist resolver returned a non-local cover URL")
 	}
+	if err == nil && resolved.PreviewURL != "" && !localHTTPURL(resolved.PreviewURL) {
+		err = errors.New("playlist resolver returned a non-local preview URL")
+	}
 	if err != nil {
 		if report && ctx.Err() == nil && s.reporter != nil && entry.lastErr != err.Error() {
 			entry.lastErr = err.Error()
@@ -357,6 +450,9 @@ func (s *Server) resolveEntry(ctx context.Context, index int, entry *entry, repo
 	}
 	entry.value = resolved
 	entry.lastErr = ""
+	if err := ctx.Err(); err != nil {
+		return ResolvedItem{}, err
+	}
 	return resolved, nil
 }
 

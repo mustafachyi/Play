@@ -26,8 +26,10 @@ const (
 )
 
 type TransportError struct {
-	Kind   TransportErrorKind
-	Status int
+	Kind       TransportErrorKind
+	Status     int
+	RetryAfter string
+	ReceivedAt time.Time
 }
 
 func (e *TransportError) Error() string {
@@ -62,8 +64,10 @@ func readResponse(ctx, requestCtx context.Context, resp *http.Response, requestE
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 32<<10))
-		return nil, &TransportError{Kind: HTTPFailure, Status: resp.StatusCode}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &TransportError{Kind: HTTPFailure, Status: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), ReceivedAt: time.Now()}
 	}
 	if resp.ContentLength > maxResponseSize {
 		return nil, &TransportError{Kind: ResponseTooLarge}

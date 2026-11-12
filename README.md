@@ -1,90 +1,74 @@
 # Play
 
-Play YouTube videos and playlists with [mpv](https://mpv.io/) on Windows. Supports audio-only playback, multiple tracks, subtitles, and timestamps.
+Play YouTube videos and playlists with [mpv](https://mpv.io/) on Windows x64.
 
-## Installation
+## Install
 
-### Scoop
+Install with Scoop:
 
 ```cmd
 scoop bucket add play https://github.com/mustafachyi/Play
 scoop install play/play
 ```
 
-Scoop installs mpv automatically. To update:
+Scoop also installs mpv. To update Play:
 
 ```cmd
 scoop update
 scoop update play
 ```
 
-### Manual
-
-Download `play.exe` from the [latest release](https://github.com/mustafachyi/Play/releases/latest) and add it to your `PATH`. Install mpv and ensure `mpv.exe` is also on your `PATH`.
+For a manual installation, download `play.exe` from the [latest release](https://github.com/mustafachyi/Play/releases/latest), install mpv, and add both executable folders to `PATH`.
 
 ## Usage
-
-Play a video:
 
 ```cmd
 play "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
-Play audio only:
+You can also pass a playlist URL or video ID. Run `play` without arguments to enter one at the prompt.
 
-```cmd
-play -a "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-```
+Play returns to the prompt after playback starts. Close the mpv window to stop playback.
 
-Play a playlist:
-
-```cmd
-play "https://www.youtube.com/playlist?list=PLAYLIST_ID"
-```
-
-Video IDs are also accepted. Run `play` without an argument to enter a URL or ID interactively.
-
-Playback runs in the background, leaving the terminal available. Close mpv to stop playback. Use `-wait` to keep the command attached until playback ends.
+The player opens centered at a size that fits your screen. You can resize it or switch to full screen.
 
 | Option | Description |
 | --- | --- |
 | `-a` | Play audio only |
-| `-wait` | Wait for playback to end |
+| `-wait` | Wait for playback to end before returning to the prompt |
 | `-h`, `-help` | Show help |
-| `-version` | Show version |
+| `-version` | Show the version |
 
 YouTube Mix playlists and live streams are not supported.
 
-## ModernZ
+## PlayView (optional)
 
-The optional `ModernZ.zip` contains a modified version of [ModernZ](https://github.com/Samillion/ModernZ) with a video quality control for Play.
+For custom controls and hover previews, extract `PlayView.zip` into your mpv configuration folder:
 
-Extract the archive into your mpv configuration directory:
-
-| Installation | Directory |
+| Installation | Folder |
 | --- | --- |
-| Scoop | `%USERPROFILE%\scoop\apps\mpv\current\portable_config` |
-| Regular mpv | `%APPDATA%\mpv` |
+| Scoop (default) | `%USERPROFILE%\scoop\apps\mpv\current\portable_config` |
+| mpv (default configuration) | `%APPDATA%\mpv` |
 
-For a custom Scoop location, run `scoop prefix mpv` and use the `portable_config` directory there. If mpv already has a `portable_config` directory beside `mpv.exe`, use it.
+For a custom Scoop location, run `scoop prefix mpv` and use its `portable_config` folder. For other portable installations, use mpv's active configuration folder.
 
-Create or open `mpv.conf` in that directory and add:
+Add this to `mpv.conf` in that folder:
 
 ```text
 osc=no
 ```
 
-Optionally, add `border=no` to remove the window border.
+## Development
 
-ModernZ retains its own license.
+Use Go 1.27.3 or later. From the project root:
 
-## Requirements
+```powershell
+go build -o play.exe .
+go vet ./...
+go test -count=1 ./...
+```
 
-- Windows x64
-- Internet connection
-- mpv
-
-Building from source requires Go 1.27.3 or later.
+Playback integration tests require `mpv.exe` on `PATH`. They are skipped if it is unavailable.
 
 ## License
 

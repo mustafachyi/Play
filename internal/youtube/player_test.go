@@ -129,7 +129,7 @@ func TestParsePlayerResponsesAllowsPostLiveRecordingWithUsableStreams(t *testing
     }`)
 	item, err := parsePlayerResponses([][]byte{raw}, testVideoID)
 	if err != nil || item.Title != "Post-live replay" {
-		t.Fatalf("item=%#v err=%v", item, err)
+		t.Fatalf("item = %#v, error = %v", item, err)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestParsePlayerResponsesExplicitNotLiveOverridesMicroformatFallback(t *test
     }`)
 	item, err := parsePlayerResponses([][]byte{raw}, testVideoID)
 	if err != nil || item.Title != "Completed" {
-		t.Fatalf("item=%#v err=%v", item, err)
+		t.Fatalf("item = %#v, error = %v", item, err)
 	}
 }
 
@@ -253,7 +253,7 @@ func TestChooseThumbnailsAddsHigherResolutionCanonicalFallbacks(t *testing.T) {
 	}
 	for i, want := range wantPrefix {
 		if got[i] != want {
-			t.Fatalf("thumbnail %d = %q; want %q; all=%#v", i, got[i], want, got)
+			t.Fatalf("thumbnail %d = %q; want %q; all = %#v", i, got[i], want, got)
 		}
 	}
 }
@@ -270,7 +270,7 @@ func TestParsePlayerResponsesDeduplicatesSubtitles(t *testing.T) {
 	}
 }
 
-func TestParsePlayerResponsesUnplayable(t *testing.T) {
+func TestParsePlayerResponsesRejectsUnplayableMedia(t *testing.T) {
 	raw := []byte(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"Removed"}}`)
 	_, err := parsePlayerResponses([][]byte{raw}, testVideoID)
 	var playerErr *PlayerError
@@ -309,13 +309,51 @@ func TestVisitorDataValidation(t *testing.T) {
 	}
 }
 
+func TestVisitorDataValidatesEveryHTTPHeaderFieldByte(t *testing.T) {
+	for value := 0; value <= 255; value++ {
+		visitor := "visitor-" + string(rune(value)) + "-data"
+		body, err := json.Marshal(map[string]any{"responseContext": map[string]any{"visitorData": visitor}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := visitor
+		if value < ' ' && value != '\t' || value == 0x7f {
+			want = ""
+		}
+		if got := extractVisitorData(body); got != want {
+			t.Errorf("byte %#x: got %q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestFetchPlayerDoesNotRetryLocallyInvalidVisitorHeaders(t *testing.T) {
+	for _, value := range []string{"visitor\x00data", "visitor\x1fdata", "visitor\x7fdata"} {
+		calls := 0
+		client := testClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			body, err := json.Marshal(map[string]any{
+				"playabilityStatus": map[string]any{"status": "LOGIN_REQUIRED"},
+				"responseContext":   map[string]any{"visitorData": value},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return response(http.StatusOK, string(body)), nil
+		})})
+		body, err := client.fetchPlayer(context.Background(), playerProfiles[0], testVideoID)
+		if err != nil || calls != 1 || !strings.Contains(string(body), "LOGIN_REQUIRED") {
+			t.Fatalf("invalid visitor=%q, calls=%d, body=%s, error=%v", value, calls, body, err)
+		}
+	}
+}
+
 func TestFlexibleIntResetsAndRejectsMalformedValues(t *testing.T) {
 	var value flexibleInt
 	if err := json.Unmarshal([]byte(`"42"`), &value); err != nil || !value.set || value.value != 42 {
-		t.Fatalf("value = %#v err=%v", value, err)
+		t.Fatalf("value = %#v, error = %v", value, err)
 	}
 	if err := json.Unmarshal([]byte(`"bad"`), &value); err != nil || value.set || value.value != 0 {
-		t.Fatalf("value after malformed input = %#v err=%v", value, err)
+		t.Fatalf("value after malformed input = %#v, error = %v", value, err)
 	}
 }
 
@@ -343,7 +381,7 @@ func TestChooseVideosOrdersHeightsDescending(t *testing.T) {
 	}
 	for i, height := range want {
 		if videos[i].Height != height {
-			t.Fatalf("video %d height = %d; want %d", i, videos[i].Height, height)
+			t.Fatalf("video %d, height = %d; want %d", i, videos[i].Height, height)
 		}
 	}
 }

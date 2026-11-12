@@ -8,9 +8,10 @@ import (
 	"os/signal"
 
 	"play/internal/app"
+	"play/internal/httpretry"
 )
 
-const version = "0.1.3"
+const version = "0.1.4"
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--play-worker" {
@@ -31,5 +32,8 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "play: %v\n", err)
+	if len(os.Args) > 1 && os.Args[1] == "-playlist-page" && errors.Is(err, httpretry.ErrDelayTooLong) {
+		os.Exit(75)
+	}
 	os.Exit(1)
 }
