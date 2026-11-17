@@ -66,7 +66,12 @@ func (h *sourceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media unavailable", http.StatusBadGateway)
 		return
 	}
-	requested, err := parseRange(r.Header.Get("Range"), size)
+	rangeHeader := ""
+	_, hasIfRange := r.Header["If-Range"]
+	if r.Method == http.MethodGet && !hasIfRange {
+		rangeHeader = r.Header.Get("Range")
+	}
+	requested, err := parseRange(rangeHeader, size)
 	if err != nil {
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
@@ -324,10 +329,17 @@ func parseRange(value string, size int64) (byteRange, error) {
 	if value == "" {
 		return byteRange{start: 0, end: size - 1}, nil
 	}
-	if len(value) < 6 || !strings.EqualFold(value[:6], "bytes=") || strings.Contains(value[6:], ",") {
+	unit, spec, found := strings.Cut(value, "=")
+	if !found {
 		return byteRange{}, errors.New("unsupported range")
 	}
-	spec := strings.TrimSpace(value[6:])
+	if !strings.EqualFold(unit, "bytes") {
+		return byteRange{start: 0, end: size - 1}, nil
+	}
+	if strings.Contains(spec, ",") {
+		return byteRange{}, errors.New("unsupported range")
+	}
+	spec = strings.TrimSpace(spec)
 	dash := strings.IndexByte(spec, '-')
 	if dash < 0 {
 		return byteRange{}, errors.New("invalid range")

@@ -8,10 +8,11 @@ import (
 	"os/signal"
 
 	"play/internal/app"
+	"play/internal/browser"
 	"play/internal/httpretry"
 )
 
-const version = "0.1.4"
+const version = "0.1.5"
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--play-worker" {
@@ -21,7 +22,14 @@ func main() {
 		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	err := app.Run(ctx, version, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	var err error
+	if browser.IsNativeInvocation(os.Args) {
+		err = browser.RunNative(ctx, version, os.Args, os.Stdin, os.Stdout)
+	} else if len(os.Args) > 1 && os.Args[1] == "-browser" {
+		err = browser.Manage(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr)
+	} else {
+		err = app.Run(ctx, version, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	}
 	stop()
 
 	if err == nil {

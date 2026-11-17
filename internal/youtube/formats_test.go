@@ -51,3 +51,21 @@ func TestDRMClassificationAcceptsWhitespaceInsideEmptyArrays(t *testing.T) {
 		}
 	}
 }
+
+func TestMalformedCaptionQueryDoesNotDisplaceUsableFallback(t *testing.T) {
+	for _, address := range []string{
+		"https://captions.example/timedtext?signature=%ZZ&lang=en",
+		"https://captions.example/timedtext?signature=bad;token&lang=en",
+	} {
+		t.Run(address, func(t *testing.T) {
+			responses := []playerResponse{{Captions: &captions{Tracklist: &captionTracklist{Tracks: []captionTrack{
+				{BaseURL: address, VSSID: ".en", LanguageCode: "en"},
+				{BaseURL: "https://captions.example/timedtext?signature=valid&lang=en", VSSID: ".en", LanguageCode: "en"},
+			}}}}}
+			selected := chooseSubtitles(responses)
+			if len(selected) != 1 || selected[0].URL != "https://captions.example/timedtext?fmt=vtt&lang=en&signature=valid" {
+				t.Fatalf("malformed caption displaced valid track: %#v", selected)
+			}
+		})
+	}
+}

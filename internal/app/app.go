@@ -286,12 +286,14 @@ func printUsage(out io.Writer) error {
   play -a [youtube-url|playlist-url|video-id]
   play -h
   play -version
+  play -browser [enable|status|repair|disable]
 
 Options:
   -a        Play audio only
   -wait     Wait for playback to end before returning to the prompt
   -h, -help Show help
   -version  Show the version
+  -browser  Manage Firefox integration
 `)
 	return err
 }

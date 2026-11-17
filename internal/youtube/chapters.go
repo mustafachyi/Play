@@ -173,6 +173,9 @@ func parseDescriptionChapters(description string, duration int64) []media.Chapte
 	if len(chapters) < 3 || chapters[0].Time != 0 {
 		return nil
 	}
+	if duration > 0 && float64(duration)-chapters[len(chapters)-1].Time < 10 {
+		return nil
+	}
 	return chapters
 }
 

@@ -34,6 +34,8 @@ func TestParseRange(t *testing.T) {
 		{"past end", "bytes=100-", 100, byteRange{}, true},
 		{"reversed bounds", "bytes=20-10", 100, byteRange{}, true},
 		{"zero suffix", "bytes=-0", 100, byteRange{}, true},
+		{"unknown unit", "items=10-19", 100, byteRange{start: 0, end: 99}, false},
+		{"unknown unit with multiple ranges", "items=0-1,4-5", 100, byteRange{start: 0, end: 99}, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -93,6 +95,70 @@ func TestSourceHandlerUsesKnownSizeWithoutProbe(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodHead, "http://local/v01.webm", nil))
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Length") != "12345" || requests.Load() != 0 {
 		t.Fatalf("status = %d, length = %q, requests = %d", recorder.Code, recorder.Header().Get("Content-Length"), requests.Load())
+	}
+}
+
+func TestSourceHandlerIgnoresRangeForHead(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("HEAD fetched upstream media despite a known size")
+		return nil, errors.New("unexpected upstream request")
+	})}
+	handler := &sourceHandler{client: client, source: Resource{URL: "https://example.com/video", MIME: "video/webm", Size: 8}}
+	for _, value := range []string{"bytes=2-4", "bytes=99-", "bytes=invalid", "items=2-4"} {
+		t.Run(value, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodHead, "http://local/video", nil)
+			request.Header.Set("Range", value)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || response.Header().Get("Content-Length") != "8" || response.Header().Get("Content-Range") != "" || response.Body.Len() != 0 {
+				t.Fatalf("status = %d, headers = %v, body = %q", response.Code, response.Header(), response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSourceHandlerIgnoresUnknownRangeUnit(t *testing.T) {
+	const payload = "abcdefgh"
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Header.Get("Range") != "bytes=0-7" {
+			t.Fatalf("upstream range = %q", r.Header.Get("Range"))
+		}
+		return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Range": {"bytes 0-7/8"}}, ContentLength: 8, Body: io.NopCloser(strings.NewReader(payload))}, nil
+	})}
+	handler := &sourceHandler{client: client, source: Resource{URL: "https://example.com/video", MIME: "video/webm", Size: 8}}
+	request := httptest.NewRequest(http.MethodGet, "http://local/video", nil)
+	request.Header.Set("Range", "items=2-4")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Length") != "8" || response.Header().Get("Content-Range") != "" || response.Body.String() != payload || requests != 1 {
+		t.Fatalf("status = %d, headers = %v, body = %q, requests = %d", response.Code, response.Header(), response.Body.String(), requests)
+	}
+}
+
+func TestSourceHandlerIgnoresRangeWithoutMatchingValidator(t *testing.T) {
+	const payload = "abcdefgh"
+	for _, validator := range []string{"\"previous\"", "W/\"previous\"", "Sun, 06 Nov 1994 08:49:37 GMT", "invalid", ""} {
+		t.Run(validator, func(t *testing.T) {
+			requests := 0
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				requests++
+				if r.Header.Get("Range") != "bytes=0-7" {
+					t.Fatalf("upstream range = %q", r.Header.Get("Range"))
+				}
+				return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Range": {"bytes 0-7/8"}}, ContentLength: 8, Body: io.NopCloser(strings.NewReader(payload))}, nil
+			})}
+			handler := &sourceHandler{client: client, source: Resource{URL: "https://example.com/video", MIME: "video/webm", Size: 8}}
+			request := httptest.NewRequest(http.MethodGet, "http://local/video", nil)
+			request.Header.Set("Range", "bytes=2-4")
+			request.Header.Set("If-Range", validator)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || response.Header().Get("Content-Length") != "8" || response.Header().Get("Content-Range") != "" || response.Body.String() != payload || requests != 1 {
+				t.Fatalf("status = %d, headers = %v, body = %q, requests = %d", response.Code, response.Header(), response.Body.String(), requests)
+			}
+		})
 	}
 }
 

@@ -65,6 +65,7 @@ func playlistArguments(request PlaylistRequest, scriptPath string) []string {
 		"--sid=auto",
 		"--sub-visibility=no",
 		"--watch-later-options-remove=sub-pos",
+		"--script-opts-append=play-session=yes",
 		"--script-opts-append=playview-preview=playlist",
 		"--script="+scriptPath,
 		"--playlist-start="+strconv.Itoa(request.StartIndex),

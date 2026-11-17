@@ -155,6 +155,7 @@ func TestVideoArgumentsKeepWindowAndSelectionStable(t *testing.T) {
 		"--sid=auto",
 		"--sub-visibility=no",
 		"--watch-later-options-remove=sub-pos",
+		"--script-opts-append=play-session=yes",
 		"--force-media-title=Actual title",
 		`--input-commands-append=keybind _ "cycle-values video 1 2"`,
 		"--start=462",

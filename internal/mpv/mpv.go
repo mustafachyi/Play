@@ -184,6 +184,7 @@ func arguments(request Request, edlPath string) []string {
 		"--sid=auto",
 		"--sub-visibility=no",
 		"--watch-later-options-remove=sub-pos",
+		"--script-opts-append=play-session=yes",
 		"--force-media-title="+request.Title,
 	)
 	if !hasVideo {

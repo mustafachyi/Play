@@ -2,6 +2,7 @@ package mpv
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -26,17 +27,11 @@ func writeEDL(request Request) (string, error) {
 		return "", err
 	}
 	name := file.Name()
-	cleanup := func() {
-		_ = file.Close()
-		_ = os.Remove(name)
-	}
 	if _, err := file.WriteString(buildEDL(request)); err != nil {
-		cleanup()
-		return "", err
+		return "", errors.Join(err, file.Close(), removeTemp(name, "playback description"))
 	}
 	if err := file.Close(); err != nil {
-		cleanup()
-		return "", err
+		return "", errors.Join(err, removeTemp(name, "playback description"))
 	}
 	return name, nil
 }

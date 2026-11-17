@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -103,34 +103,50 @@ func TestSourceHandlerBoundsRepeatedStalledRanges(t *testing.T) {
 }
 
 func TestSourceHandlerAllowsContinuousSlowProgress(t *testing.T) {
-	payload := "abcdefghijklmnop"
-	var calls atomic.Int32
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(payload)-1, len(payload)))
-		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
-		w.WriteHeader(http.StatusPartialContent)
-		for _, value := range []byte(payload) {
-			_, _ = w.Write([]byte{value})
-			w.(http.Flusher).Flush()
-			select {
-			case <-r.Context().Done():
+	synctest.Test(t, func(t *testing.T) {
+		const payload = "abcdefghijklmnop"
+		const interval = 10 * time.Millisecond
+		var calls atomic.Int32
+		upstream := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if r.TLS == nil {
+				t.Error("upstream request did not use TLS")
+				http.Error(w, "TLS required", http.StatusBadRequest)
 				return
-			case <-time.After(10 * time.Millisecond):
 			}
+			if r.Header.Get("Range") != "bytes=0-15" {
+				t.Errorf("upstream range = %q", r.Header.Get("Range"))
+				http.Error(w, "invalid range", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Range", "bytes 0-15/16")
+			w.Header().Set("Content-Length", "16")
+			w.WriteHeader(http.StatusPartialContent)
+			w.(http.Flusher).Flush()
+			for _, value := range []byte(payload) {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(interval):
+				}
+				if _, err := w.Write([]byte{value}); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+			}
+		}))
+		handler := &sourceHandler{client: upstream.Client(), source: Resource{URL: "https://example.com/video"}, readTimeout: 50 * time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		started := time.Now()
+		var dst bytes.Buffer
+		if err := handler.copySpan(ctx, &dst, 0, int64(len(payload)-1), int64(len(payload))); err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer upstream.Close()
-	handler := &sourceHandler{client: upstream.Client(), source: Resource{URL: upstream.URL}, readTimeout: 50 * time.Millisecond}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var dst bytes.Buffer
-	if err := handler.copySpan(ctx, &dst, 0, int64(len(payload)-1), int64(len(payload))); err != nil {
-		t.Fatal(err)
-	}
-	if dst.String() != payload || calls.Load() != 1 {
-		t.Fatalf("body = %q, calls = %d", dst.String(), calls.Load())
-	}
+		if elapsed := time.Since(started); dst.String() != payload || calls.Load() != 1 || elapsed != time.Duration(len(payload))*interval {
+			t.Fatalf("body = %q, calls = %d, elapsed = %v", dst.String(), calls.Load(), elapsed)
+		}
+	})
 }
 
 type pausedWriter struct {

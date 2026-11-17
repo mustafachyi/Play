@@ -315,7 +315,10 @@ func webVTTURL(value string) string {
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return ""
 	}
-	query := u.Query()
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return ""
+	}
 	query.Set("fmt", "vtt")
 	u.RawQuery = query.Encode()
 	return u.String()

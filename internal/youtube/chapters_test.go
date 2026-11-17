@@ -93,6 +93,25 @@ func TestDescriptionChaptersUseYouTubeChapterBoundaries(t *testing.T) {
 	}
 }
 
+func TestDescriptionChaptersRequireTenSecondFinalChapter(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		duration int64
+		want     int
+	}{
+		{name: "short final chapter", duration: 49},
+		{name: "minimum final chapter", duration: 50, want: 3},
+		{name: "unknown duration", want: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseDescriptionChapters("0:00 Opening\n0:20 Middle\n0:40 Final", test.duration)
+			if len(got) != test.want {
+				t.Fatalf("duration = %d, chapters = %#v; want %d chapters", test.duration, got, test.want)
+			}
+		})
+	}
+}
+
 func chapterPlayerFixture() string {
 	return `{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"` + testVideoID + `","title":"Fixture","lengthSeconds":"100","shortDescription":"0:00 Opening\n0:20 Middle\n0:40 Final"},"streamingData":{"adaptiveFormats":[{"url":"https://video/720","mimeType":"video/mp4","height":720,"contentLength":"100"},{"url":"https://audio/en","mimeType":"audio/mp4","contentLength":"50"}]}}`
 }

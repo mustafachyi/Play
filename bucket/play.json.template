@@ -11,6 +11,25 @@
     },
     "depends": "extras/mpv",
     "bin": "play.exe",
+    "post_install": [
+        "if (-not $global) {",
+        "    if ($cmd -eq 'update' -and $old_version) {",
+        "        $previousPlay = Join-Path (Split-Path $dir) \"$old_version\\play.exe\"",
+        "        & \"$dir\\play.exe\" -browser refresh \"$previousPlay\"",
+        "    } else {",
+        "        & \"$dir\\play.exe\" -browser refresh",
+        "    }",
+        "    if ($LASTEXITCODE -ne 0) { warn 'Firefox integration needs attention. Run play -browser status.' }",
+        "}"
+    ],
+    "uninstaller": {
+        "script": [
+            "if ($cmd -eq 'uninstall' -and -not $global) {",
+            "    & \"$dir\\play.exe\" -browser remove",
+            "    if ($LASTEXITCODE -ne 0) { throw 'Firefox cleanup failed. Run play -browser disable.' }",
+            "}"
+        ]
+    },
     "checkver": {
         "github": "@REPOSITORY_URL@"
     },
