@@ -1,16 +1,35 @@
 {
-    "version": "0.1.4",
+    "version": "0.1.5",
     "description": "Play YouTube videos and playlists with mpv on Windows.",
     "homepage": "https://github.com/mustafachyi/Play",
     "license": "GPL-3.0-or-later",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/mustafachyi/Play/releases/download/v0.1.4/play.exe",
-            "hash": "ebbc129808b1e7643cdb058aaaf842a8ca418e879cfe1b01178ef4840809af09"
+            "url": "https://github.com/mustafachyi/Play/releases/download/v0.1.5/play.exe",
+            "hash": "d606734f4918fd3840a3777295150ae5e7702788f40437fb3a562992ed5edf6b"
         }
     },
     "depends": "extras/mpv",
     "bin": "play.exe",
+    "post_install": [
+        "if (-not $global) {",
+        "    if ($cmd -eq 'update' -and $old_version) {",
+        "        $previousPlay = Join-Path (Split-Path $dir) \"$old_version\\play.exe\"",
+        "        & \"$dir\\play.exe\" -browser refresh \"$previousPlay\"",
+        "    } else {",
+        "        & \"$dir\\play.exe\" -browser refresh",
+        "    }",
+        "    if ($LASTEXITCODE -ne 0) { warn 'Firefox integration needs attention. Run play -browser status.' }",
+        "}"
+    ],
+    "uninstaller": {
+        "script": [
+            "if ($cmd -eq 'uninstall' -and -not $global) {",
+            "    & \"$dir\\play.exe\" -browser remove",
+            "    if ($LASTEXITCODE -ne 0) { throw 'Firefox cleanup failed. Run play -browser disable.' }",
+            "}"
+        ]
+    },
     "checkver": {
         "github": "https://github.com/mustafachyi/Play"
     },
