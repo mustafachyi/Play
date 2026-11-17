@@ -3,10 +3,13 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -85,4 +88,82 @@ func TestNativeEnvironmentSelectsConfiguredMPV(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestNativeLaunchExitAccessDenied(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "launches.txt")
+	t.Setenv("PLAY_BROWSER_NATIVE_TEST_OUTPUT", output)
+	t.Setenv("PLAY_BROWSER_NATIVE_TEST_CHILD", "exit-access-denied")
+	err = launchNativePlayback(context.Background(), executable, nativeTestMPV(t), nativeRequest{URL: nativeTestURL, Mode: "video"})
+	if err == nil || !strings.Contains(err.Error(), "exit status 5") {
+		t.Fatalf("child exit: %v", err)
+	}
+	payload, err := os.ReadFile(output)
+	if err != nil || string(payload) != "launch\n" {
+		t.Fatalf("child launches = %q, read error = %v; want one launch", payload, err)
+	}
+}
+
+func TestNativeLaunchInRestrictedJob(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if os.Getenv("PLAY_BROWSER_NATIVE_TEST_RESTRICTED_JOB") == "1" {
+		command := exec.CommandContext(ctx, executable)
+		command.Env = append(os.Environ(), "PLAY_BROWSER_NATIVE_TEST_CHILD=capture")
+		command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: nativeBreakawayFromJob | nativeCreateNoWindow}
+		if err := command.Start(); !errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+			if err == nil {
+				_ = command.Wait()
+			}
+			t.Fatalf("restricted job breakaway = %v; want access denied", err)
+		}
+		t.Run("arguments-and-environment", TestNativeLaunchArgumentsAndEnvironment)
+		t.Run("failure-and-cancellation", TestNativeLaunchFailureAndCancellation)
+		t.Run("exit-access-denied", TestNativeLaunchExitAccessDenied)
+		return
+	}
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestNativeLaunchInRestrictedJob$", "-test.v", "-test.timeout=30s")
+	command.Env = append(os.Environ(), "PLAY_BROWSER_NATIVE_TEST_CHILD=restricted-job")
+	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: nativeCreateNoWindow}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("restricted-job launch checks: %v\n%s", err, output)
+	}
+}
+
+func runNativeTestsInRestrictedJob(m *testing.M) int {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	job, _, callErr := kernel32.NewProc("CreateJobObjectW").Call(0, 0)
+	if job == 0 {
+		_, _ = os.Stderr.WriteString("create restricted test job: " + callErr.Error() + "\n")
+		return 2
+	}
+	defer syscall.CloseHandle(syscall.Handle(job))
+	process, err := syscall.GetCurrentProcess()
+	if err != nil {
+		_, _ = os.Stderr.WriteString("get test process: " + err.Error() + "\n")
+		return 2
+	}
+	assigned, _, callErr := kernel32.NewProc("AssignProcessToJobObject").Call(job, uintptr(process))
+	if assigned == 0 {
+		_, _ = os.Stderr.WriteString("assign restricted test job: " + callErr.Error() + "\n")
+		return 2
+	}
+	if err := os.Unsetenv("PLAY_BROWSER_NATIVE_TEST_CHILD"); err != nil {
+		_, _ = os.Stderr.WriteString(err.Error() + "\n")
+		return 2
+	}
+	if err := os.Setenv("PLAY_BROWSER_NATIVE_TEST_RESTRICTED_JOB", "1"); err != nil {
+		_, _ = os.Stderr.WriteString(err.Error() + "\n")
+		return 2
+	}
+	return m.Run()
 }

@@ -35,6 +35,18 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		case "wait":
 			time.Sleep(time.Minute)
+		case "restricted-job":
+			os.Exit(runNativeTestsInRestrictedJob(m))
+		case "exit-access-denied":
+			path := os.Getenv("PLAY_BROWSER_NATIVE_TEST_OUTPUT")
+			payload, err := os.ReadFile(path)
+			if err != nil && !os.IsNotExist(err) {
+				os.Exit(2)
+			}
+			if os.WriteFile(path, append(payload, []byte("launch\n")...), 0600) != nil {
+				os.Exit(2)
+			}
+			os.Exit(5)
 		}
 		os.Exit(0)
 	}

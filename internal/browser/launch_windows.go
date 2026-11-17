@@ -35,15 +35,27 @@ func launchNativePlayback(ctx context.Context, executable, mpvPath string, reque
 	if request.Mode == "audio" {
 		args = []string{"-a", request.URL}
 	}
-	command := exec.CommandContext(ctx, executable, args...)
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: nativeBreakawayFromJob | nativeCreateNoWindow}
-	command.Dir = filepath.Dir(executable)
-	command.Env = nativePlaybackEnvironment(os.Environ(), filepath.Dir(mpvPath))
-	command.Stdout = io.Discard
 	diagnostics := &nativeDiagnosticBuffer{}
-	command.Stderr = diagnostics
-	command.WaitDelay = time.Second
-	err := command.Run()
+	environment := nativePlaybackEnvironment(os.Environ(), filepath.Dir(mpvPath))
+	createCommand := func(creationFlags uint32) *exec.Cmd {
+		command := exec.CommandContext(ctx, executable, args...)
+		command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: creationFlags}
+		command.Dir = filepath.Dir(executable)
+		command.Env = environment
+		command.Stdout = io.Discard
+		command.Stderr = diagnostics
+		command.WaitDelay = time.Second
+		return command
+	}
+	command := createCommand(nativeBreakawayFromJob | nativeCreateNoWindow)
+	err := command.Start()
+	if errors.Is(err, syscall.ERROR_ACCESS_DENIED) && ctx.Err() == nil {
+		command = createCommand(nativeCreateNoWindow)
+		err = command.Start()
+	}
+	if err == nil {
+		err = command.Wait()
+	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return errors.New("Startup canceled. Check whether mpv opened before retrying.")
